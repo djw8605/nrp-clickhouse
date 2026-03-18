@@ -20,7 +20,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: etl
-              image: ghcr.io/example/nrp-accounting-pipeline:latest
+              image: ghcr.io/djw8605/nrp-clickhouse:latest
               imagePullPolicy: IfNotPresent
               command: ["python", "etl.py"]
               envFrom:

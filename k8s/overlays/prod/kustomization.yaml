@@ -5,9 +5,9 @@ resources:
   - ../../base
 
 images:
-  - name: ghcr.io/example/nrp-accounting-pipeline
-    newName: ghcr.io/example/nrp-accounting-pipeline
-    newTag: v0.1.0
+  - name: ghcr.io/djw8605/nrp-clickhouse
+    newName: ghcr.io/djw8605/nrp-clickhouse
+    newTag: latest
 
 patches:
   - path: cronjob-patch.yaml

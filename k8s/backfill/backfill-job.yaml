@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nrp-accounting-backfill
+  labels:
+    app.kubernetes.io/component: backfill
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: backfill
+    spec:
+      serviceAccountName: nrp-accounting-pipeline
+      restartPolicy: OnFailure
+      containers:
+        - name: backfill
+          image: ghcr.io/example/nrp-accounting-pipeline:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "backfill.py"]
+          args: ["--start", "2025-01-01", "--end", "2025-02-01"]
+          envFrom:
+            - configMapRef:
+                name: nrp-accounting-config
+            - secretRef:
+                name: nrp-accounting-secrets
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"

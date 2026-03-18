@@ -1,0 +1,143 @@
+{
+  "cpu": {
+    "status": "success",
+    "data": {
+      "resultType": "matrix",
+      "result": [
+        {
+          "metric": {
+            "namespace": "analytics",
+            "pod": "trainer-0",
+            "created_by": "jane.doe",
+            "node": "gpu-node-a"
+          },
+          "values": [
+            [1700000000, "1.0"],
+            [1700003600, "1.2"],
+            [1700007200, "0.8"]
+          ]
+        },
+        {
+          "metric": {
+            "namespace": "analytics",
+            "pod": "trainer-1",
+            "created_by": "jane.doe",
+            "node": "gpu-node-b"
+          },
+          "values": [
+            [1700000000, "0.5"],
+            [1700003600, "0.6"],
+            [1700007200, "0.7"]
+          ]
+        }
+      ]
+    }
+  },
+  "gpu": {
+    "status": "success",
+    "data": {
+      "resultType": "matrix",
+      "result": [
+        {
+          "metric": {
+            "namespace": "analytics",
+            "pod": "trainer-0",
+            "created_by": "jane.doe",
+            "node": "gpu-node-a",
+            "resource": "nvidia_com_gpu"
+          },
+          "values": [
+            [1700000000, "0"],
+            [1700003600, "3600"],
+            [1700007200, "7200"]
+          ]
+        }
+      ]
+    }
+  },
+  "memory": {
+    "status": "success",
+    "data": {
+      "resultType": "matrix",
+      "result": [
+        {
+          "metric": {
+            "namespace": "analytics",
+            "pod": "trainer-0",
+            "created_by": "jane.doe",
+            "node": "gpu-node-a"
+          },
+          "values": [
+            [1700000000, "4294967296"],
+            [1700003600, "4294967296"],
+            [1700007200, "5368709120"]
+          ]
+        }
+      ]
+    }
+  },
+  "network_receive": {
+    "status": "success",
+    "data": {
+      "resultType": "matrix",
+      "result": [
+        {
+          "metric": {
+            "namespace": "analytics",
+            "pod": "trainer-0",
+            "created_by": "jane.doe",
+            "node": "gpu-node-a"
+          },
+          "values": [
+            [1700000000, "1000"],
+            [1700003600, "1100"],
+            [1700007200, "900"]
+          ]
+        }
+      ]
+    }
+  },
+  "network_transmit": {
+    "status": "success",
+    "data": {
+      "resultType": "matrix",
+      "result": [
+        {
+          "metric": {
+            "namespace": "analytics",
+            "pod": "trainer-0",
+            "created_by": "jane.doe",
+            "node": "gpu-node-a"
+          },
+          "values": [
+            [1700000000, "500"],
+            [1700003600, "450"],
+            [1700007200, "550"]
+          ]
+        }
+      ]
+    }
+  },
+  "ephemeral_storage": {
+    "status": "success",
+    "data": {
+      "resultType": "matrix",
+      "result": [
+        {
+          "metric": {
+            "namespace": "analytics",
+            "pod": "trainer-0",
+            "created_by": "jane.doe",
+            "node": "gpu-node-a",
+            "resource": "ephemeral_storage"
+          },
+          "values": [
+            [1700000000, "2147483648"],
+            [1700003600, "3221225472"],
+            [1700007200, "3221225472"]
+          ]
+        }
+      ]
+    }
+  }
+}

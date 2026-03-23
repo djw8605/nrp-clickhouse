@@ -4,6 +4,7 @@ metadata:
   name: nrp-accounting-config
 data:
   PROMETHEUS_URL: "http://thanos-query.monitoring.svc.cluster.local:9090"
+  PORTAL_RPC_URL: "https://portal.nrp.ai/rpc"
   CLICKHOUSE_DATABASE: "accounting"
   CLICKHOUSE_PORT: "8123"
   CLICKHOUSE_SECURE: "false"
@@ -11,4 +12,5 @@ data:
   QUERY_STEP: "1h"
   RETRY_LIMIT: "4"
   PROMETHEUS_TIMEOUT_SECONDS: "60"
+  PORTAL_TIMEOUT_SECONDS: "60"
   CLICKHOUSE_WRITE_BATCH_SIZE: "5000"

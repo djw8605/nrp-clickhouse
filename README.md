@@ -11,6 +11,7 @@ The pipeline writes two usage tables:
 
 `cluster_pod_usage_daily` stores both `pod_name` and `pod_hash` (`CityHash64`) so large pod-cardinality workloads remain query-efficient while retaining a debug-friendly raw pod identifier.
 Both tables include a `node` dimension so namespace-level summaries can be broken down by the node where jobs ran.
+The ETL also maintains a namespace dimension table populated from `portal.nrp.ai`.
 
 ## Table Architecture
 
@@ -61,6 +62,22 @@ Columns:
 - `node String`
 - `institution_name LowCardinality(String)`
 
+### `namespace_metadata_mapping` (dimension table)
+
+- Purpose: lookup table for joining namespace usage to current namespace metadata from `portal.nrp.ai`
+- Engine: `MergeTree`
+- Order key: `namespace`
+- Free-form fields like `Description` are intentionally omitted
+
+Columns:
+
+- `namespace String`
+- `pi LowCardinality(String)`
+- `institution LowCardinality(String)`
+- `admins String`
+- `user_institutions String`
+- `updated_at DateTime`
+
 ## What Data Goes Where
 
 - Source metric: `namespace_allocated_resources`
@@ -102,6 +119,7 @@ pip install -r requirements.txt
 
 ```bash
 export PROMETHEUS_URL="https://thanos.example.org"
+export PORTAL_RPC_URL="https://portal.nrp.ai/rpc"
 export CLICKHOUSE_HOST="clickhouse.example.org"   # or clickhouse.example.org:28394
 export CLICKHOUSE_USER="default"
 export CLICKHOUSE_PASSWORD="..."
@@ -109,6 +127,7 @@ export CLICKHOUSE_DATABASE="accounting"
 export MAX_QUERY_WORKERS=8
 export QUERY_STEP="1h"
 export RETRY_LIMIT=4
+export PORTAL_TIMEOUT_SECONDS=60
 ```
 
 `CLICKHOUSE_HOST` supports `host` or `host:port`. If a port is embedded in `CLICKHOUSE_HOST`, it takes precedence over `CLICKHOUSE_PORT`.
@@ -127,7 +146,7 @@ Files to customize before apply:
 
 - `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`
 - `k8s/overlays/prod/kustomization.yaml`: set your pipeline image name/tag
-- `k8s/base/configmap.yaml`: adjust Prometheus URL and runtime tuning values
+- `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, and runtime tuning values
 
 Run a one-time backfill job:
 
@@ -143,6 +162,9 @@ kubectl apply -k k8s/backfill
 ```bash
 python etl.py --date 2026-03-13
 ```
+
+Each ETL run also queries `portal.nrp.ai` and syncs `namespace_metadata_mapping`.
+Namespaces observed in usage data but missing from the portal response are inserted with `Unknown` metadata so the mapping table still covers observed usage.
 
 Options:
 
@@ -196,6 +218,23 @@ GROUP BY u.date, m.institution_name, u.namespace, u.resource, u.unit
 ORDER BY u.date DESC, m.institution_name, u.namespace, u.resource;
 ```
 
+Example: namespace usage by PI and institution
+
+```sql
+SELECT
+  u.date,
+  m.pi,
+  m.institution,
+  u.namespace,
+  u.resource,
+  u.unit,
+  sum(u.usage) AS usage
+FROM cluster_namespace_usage_daily AS u
+LEFT JOIN namespace_metadata_mapping AS m ON u.namespace = m.namespace
+GROUP BY u.date, m.pi, m.institution, u.namespace, u.resource, u.unit
+ORDER BY u.date DESC, m.institution, m.pi, u.namespace;
+```
+
 Example: all usage for one institution
 
 ```sql
@@ -217,8 +256,10 @@ ORDER BY u.date DESC, u.namespace, u.node, u.resource;
 ## Reliability + Idempotency
 
 - Daily usage query via `sum_over_time(namespace_allocated_resources[1d:1h]@end_ts)`
-- Retries with exponential backoff for Prometheus and ClickHouse operations
+- Retries with exponential backoff for Prometheus, `portal.nrp.ai`, and ClickHouse operations
 - Idempotent daily writes by deleting existing date rows before insert
+- Namespace metadata rows are inserted for new namespaces and updated when portal metadata changes
+- Namespace metadata rows are never deleted automatically, even if a namespace later disappears from the portal
 - Structured JSON logging for query duration, retries, row counts, and aggregation timing
 
 ## Test Mode

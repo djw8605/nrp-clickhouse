@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from .config import get_settings
 from .etl import run_for_date
 from .logging_config import configure_logging
+from .namespace_metadata import fetch_namespace_metadata
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
 
     client = connect_clickhouse(settings)
     create_tables_if_not_exist(client, settings)
+    namespace_metadata_seed_rows = fetch_namespace_metadata(settings=settings)
 
     processed = 0
     skipped = 0
@@ -62,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
                     clickhouse_client=client,
                     skip_if_exists=not args.force,
                     force_reprocess=args.force,
+                    namespace_metadata_seed_rows=namespace_metadata_seed_rows,
                 )
                 if result["status"] == "skipped":
                     skipped += 1

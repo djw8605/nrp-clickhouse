@@ -6,8 +6,14 @@ from datetime import date
 from typing import Callable, Iterable, Sequence
 
 from .config import Settings, get_settings
-from .models import NamespaceUsageRecord, NodeInstitutionRecord, PodUsageRecord
+from .models import (
+    NamespaceMetadataRecord,
+    NamespaceUsageRecord,
+    NodeInstitutionRecord,
+    PodUsageRecord,
+)
 from .schema import (
+    NAMESPACE_METADATA_TABLE_NAME,
     NAMESPACE_TABLE_NAME,
     NODE_INSTITUTION_TABLE_NAME,
     POD_TABLE_NAME,
@@ -24,6 +30,11 @@ try:
     import clickhouse_connect
 except ModuleNotFoundError:  # pragma: no cover - exercised in environments without deps
     clickhouse_connect = None
+
+
+def _sql_string_literal(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
 
 
 def _retry_with_backoff(
@@ -255,6 +266,167 @@ def replace_node_institution_mapping(
 
     logger.info("clickhouse_insert_node_institution_complete", extra={"row_count": inserted})
     return inserted
+
+
+def _fetch_existing_namespace_metadata(
+    client,
+    namespaces: Sequence[str],
+    settings: Settings,
+) -> dict[str, NamespaceMetadataRecord]:
+    if not namespaces:
+        return {}
+
+    table_name = table_qualified_name(settings.CLICKHOUSE_DATABASE, NAMESPACE_METADATA_TABLE_NAME)
+    namespace_list = ", ".join(_sql_string_literal(namespace) for namespace in sorted(set(namespaces)))
+    query = (
+        f"SELECT namespace, pi, institution, admins, user_institutions, updated_at "
+        f"FROM {table_name} WHERE namespace IN ({namespace_list})"
+    )
+
+    result_rows = _retry_with_backoff(
+        "fetch_namespace_metadata",
+        settings.RETRY_LIMIT,
+        lambda: client.query(query).result_rows,
+    )
+    return {
+        row[0]: NamespaceMetadataRecord(
+            namespace=row[0],
+            pi=row[1],
+            institution=row[2],
+            admins=row[3],
+            user_institutions=row[4],
+            updated_at=row[5],
+        )
+        for row in result_rows
+    }
+
+
+def insert_namespace_metadata(
+    client,
+    rows: Sequence[NamespaceMetadataRecord],
+    settings: Settings | None = None,
+) -> int:
+    if not rows:
+        logger.info("clickhouse_insert_namespace_metadata_skipped_no_rows")
+        return 0
+
+    active_settings = settings or get_settings()
+    batch_size = max(1, active_settings.CLICKHOUSE_WRITE_BATCH_SIZE)
+    table_name = table_qualified_name(active_settings.CLICKHOUSE_DATABASE, NAMESPACE_METADATA_TABLE_NAME)
+
+    inserted = 0
+    for batch in _chunk_rows(rows, batch_size):
+        payload = [row.to_clickhouse_tuple() for row in batch]
+
+        def _insert_batch() -> None:
+            client.insert(
+                table_name,
+                payload,
+                column_names=[
+                    "namespace",
+                    "pi",
+                    "institution",
+                    "admins",
+                    "user_institutions",
+                    "updated_at",
+                ],
+            )
+
+        _retry_with_backoff(
+            "insert_namespace_metadata_batch",
+            active_settings.RETRY_LIMIT,
+            _insert_batch,
+        )
+        inserted += len(batch)
+
+    logger.info("clickhouse_insert_namespace_metadata_complete", extra={"row_count": inserted})
+    return inserted
+
+
+def update_namespace_metadata(
+    client,
+    rows: Sequence[NamespaceMetadataRecord],
+    settings: Settings | None = None,
+) -> int:
+    if not rows:
+        logger.info("clickhouse_update_namespace_metadata_skipped_no_rows")
+        return 0
+
+    active_settings = settings or get_settings()
+    table_name = table_qualified_name(active_settings.CLICKHOUSE_DATABASE, NAMESPACE_METADATA_TABLE_NAME)
+
+    updated = 0
+    for row in rows:
+        timestamp_literal = _sql_string_literal(row.updated_at.isoformat().replace("+00:00", "Z"))
+        statement = (
+            f"ALTER TABLE {table_name} UPDATE "
+            f"pi = {_sql_string_literal(row.pi)}, "
+            f"institution = {_sql_string_literal(row.institution)}, "
+            f"admins = {_sql_string_literal(row.admins)}, "
+            f"user_institutions = {_sql_string_literal(row.user_institutions)}, "
+            f"updated_at = parseDateTimeBestEffort({timestamp_literal}) "
+            f"WHERE namespace = {_sql_string_literal(row.namespace)} "
+            f"SETTINGS mutations_sync = 1"
+        )
+
+        _retry_with_backoff(
+            "update_namespace_metadata_row",
+            active_settings.RETRY_LIMIT,
+            lambda statement=statement: client.command(statement),
+        )
+        updated += 1
+
+    logger.info("clickhouse_update_namespace_metadata_complete", extra={"row_count": updated})
+    return updated
+
+
+def sync_namespace_metadata(
+    client,
+    rows: Sequence[NamespaceMetadataRecord],
+    settings: Settings | None = None,
+) -> dict[str, int]:
+    active_settings = settings or get_settings()
+
+    if not rows:
+        logger.info("clickhouse_sync_namespace_metadata_skipped_no_rows")
+        return {"inserted": 0, "updated": 0}
+
+    existing_rows = _fetch_existing_namespace_metadata(
+        client,
+        [row.namespace for row in rows],
+        active_settings,
+    )
+
+    rows_to_insert: list[NamespaceMetadataRecord] = []
+    rows_to_update: list[NamespaceMetadataRecord] = []
+
+    for row in rows:
+        existing = existing_rows.get(row.namespace)
+        if existing is None:
+            rows_to_insert.append(row)
+            continue
+
+        if (
+            existing.pi != row.pi
+            or existing.institution != row.institution
+            or existing.admins != row.admins
+            or existing.user_institutions != row.user_institutions
+        ):
+            rows_to_update.append(row)
+
+    inserted = insert_namespace_metadata(client, rows_to_insert, active_settings)
+    updated = update_namespace_metadata(client, rows_to_update, active_settings)
+
+    logger.info(
+        "clickhouse_sync_namespace_metadata_complete",
+        extra={
+            "row_count": len(rows),
+            "inserted_rows": inserted,
+            "updated_rows": updated,
+            "unchanged_rows": len(rows) - inserted - updated,
+        },
+    )
+    return {"inserted": inserted, "updated": updated}
 
 
 def _count_rows_for_date(client, table_name: str, target_date: date, settings: Settings) -> int:

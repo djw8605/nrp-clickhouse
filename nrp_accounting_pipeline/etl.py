@@ -11,6 +11,7 @@ from typing import Any
 from .aggregation import aggregate_daily_metrics, aggregate_namespace_usage
 from .config import Settings, get_settings
 from .logging_config import configure_logging
+from .namespace_metadata import fetch_namespace_metadata, merge_namespace_metadata_rows
 from .prometheus_client import query_prometheus
 
 
@@ -71,6 +72,7 @@ def run_for_date(
     clickhouse_client=None,
     skip_if_exists: bool = False,
     force_reprocess: bool = False,
+    namespace_metadata_seed_rows=None,
 ) -> dict[str, Any]:
     active_settings = settings or get_settings()
 
@@ -78,6 +80,7 @@ def run_for_date(
         create_tables_if_not_exist,
         delete_existing_partitions,
         has_data_for_date,
+        sync_namespace_metadata,
         insert_namespace_usage,
         insert_pod_usage,
     )
@@ -92,21 +95,6 @@ def run_for_date(
 
     try:
         create_tables_if_not_exist(clickhouse_client, active_settings)
-
-        if skip_if_exists and not force_reprocess and has_data_for_date(
-            clickhouse_client, target_date, active_settings
-        ):
-            logger.info(
-                "etl_date_skipped_already_ingested",
-                extra={"date": target_date.isoformat()},
-            )
-            return {
-                "status": "skipped",
-                "date": target_date.isoformat(),
-                "inserted_pod_rows": 0,
-                "inserted_namespace_rows": 0,
-                "failed_queries": {},
-            }
 
         _, end_ts = _day_bounds_utc(target_date)
 
@@ -129,6 +117,38 @@ def run_for_date(
         namespace_rows = aggregate_namespace_usage(pod_rows)
         aggregation_duration = round(time.monotonic() - aggregation_started, 3)
 
+        observed_namespaces = sorted({row.namespace for row in namespace_rows})
+        portal_rows = namespace_metadata_seed_rows
+        if portal_rows is None:
+            portal_rows = fetch_namespace_metadata(settings=active_settings)
+        namespace_metadata_rows = merge_namespace_metadata_rows(portal_rows, observed_namespaces)
+        namespace_metadata_result = sync_namespace_metadata(
+            clickhouse_client,
+            namespace_metadata_rows,
+            active_settings,
+        )
+
+        if skip_if_exists and not force_reprocess and has_data_for_date(
+            clickhouse_client, target_date, active_settings
+        ):
+            logger.info(
+                "etl_date_skipped_already_ingested",
+                extra={
+                    "date": target_date.isoformat(),
+                    "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
+                    "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
+                },
+            )
+            return {
+                "status": "skipped",
+                "date": target_date.isoformat(),
+                "inserted_pod_rows": 0,
+                "inserted_namespace_rows": 0,
+                "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
+                "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
+                "failed_queries": {},
+            }
+
         delete_existing_partitions(clickhouse_client, target_date, active_settings)
         inserted_pod_rows = insert_pod_usage(clickhouse_client, pod_rows, active_settings)
         inserted_namespace_rows = insert_namespace_usage(
@@ -141,6 +161,8 @@ def run_for_date(
                 "date": target_date.isoformat(),
                 "inserted_pod_rows": inserted_pod_rows,
                 "inserted_namespace_rows": inserted_namespace_rows,
+                "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
+                "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
                 "query_duration_seconds": query_duration,
                 "aggregation_duration_seconds": aggregation_duration,
                 "failed_query_count": len(failed_queries),
@@ -152,6 +174,8 @@ def run_for_date(
             "date": target_date.isoformat(),
             "inserted_pod_rows": inserted_pod_rows,
             "inserted_namespace_rows": inserted_namespace_rows,
+            "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
+            "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
             "failed_queries": failed_queries,
         }
     finally:

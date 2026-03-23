@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 POD_TABLE_NAME = "cluster_pod_usage_daily"
 NAMESPACE_TABLE_NAME = "cluster_namespace_usage_daily"
 NODE_INSTITUTION_TABLE_NAME = "node_institution_mapping"
+NAMESPACE_METADATA_TABLE_NAME = "namespace_metadata_mapping"
 
 POD_EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("date", "Date"),
@@ -37,6 +38,15 @@ NAMESPACE_EXPECTED_COLUMNS: list[tuple[str, str]] = [
 NODE_INSTITUTION_EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("node", "String"),
     ("institution_name", "LowCardinality(String)"),
+]
+
+NAMESPACE_METADATA_EXPECTED_COLUMNS: list[tuple[str, str]] = [
+    ("namespace", "String"),
+    ("pi", "LowCardinality(String)"),
+    ("institution", "LowCardinality(String)"),
+    ("admins", "String"),
+    ("user_institutions", "String"),
+    ("updated_at", "DateTime"),
 ]
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -106,6 +116,22 @@ ORDER BY node
 """.strip()
 
 
+def create_namespace_metadata_table_sql(database: str) -> str:
+    return f"""
+CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NAMESPACE_METADATA_TABLE_NAME)}
+(
+    namespace String,
+    pi LowCardinality(String),
+    institution LowCardinality(String),
+    admins String,
+    user_institutions String,
+    updated_at DateTime
+)
+ENGINE = MergeTree
+ORDER BY namespace
+""".strip()
+
+
 def _fetch_existing_columns(client, database: str, table_name: str) -> Mapping[str, str]:
     describe = client.query(f"DESCRIBE TABLE {table_qualified_name(database, table_name)}")
     return {row[0]: row[1] for row in describe.result_rows}
@@ -164,6 +190,7 @@ def ensure_schema(client, database: str) -> None:
     client.command(create_pod_table_sql(database))
     client.command(create_namespace_table_sql(database))
     client.command(create_node_institution_table_sql(database))
+    client.command(create_namespace_metadata_table_sql(database))
 
     _apply_table_migrations(client, database, POD_TABLE_NAME, POD_EXPECTED_COLUMNS)
     _apply_table_migrations(client, database, NAMESPACE_TABLE_NAME, NAMESPACE_EXPECTED_COLUMNS)
@@ -172,4 +199,10 @@ def ensure_schema(client, database: str) -> None:
         database,
         NODE_INSTITUTION_TABLE_NAME,
         NODE_INSTITUTION_EXPECTED_COLUMNS,
+    )
+    _apply_table_migrations(
+        client,
+        database,
+        NAMESPACE_METADATA_TABLE_NAME,
+        NAMESPACE_METADATA_EXPECTED_COLUMNS,
     )

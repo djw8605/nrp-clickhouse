@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 
 
@@ -95,3 +95,49 @@ class NodeInstitutionRecord:
 
     def to_dict(self) -> dict[str, object]:
         return {"node": self.node, "institution_name": self.institution_name}
+
+
+@dataclass(frozen=True)
+class NamespaceMetadataRecord:
+    namespace: str
+    pi: str
+    institution: str
+    admins: str
+    user_institutions: str
+    updated_at: datetime
+
+    @classmethod
+    def unknown(
+        cls,
+        namespace: str,
+        *,
+        updated_at: datetime,
+    ) -> "NamespaceMetadataRecord":
+        return cls(
+            namespace=namespace,
+            pi="Unknown",
+            institution="Unknown",
+            admins="Unknown",
+            user_institutions="Unknown",
+            updated_at=updated_at,
+        )
+
+    def to_clickhouse_tuple(self) -> tuple[object, ...]:
+        return (
+            self.namespace,
+            self.pi,
+            self.institution,
+            self.admins,
+            self.user_institutions,
+            self.updated_at,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "namespace": self.namespace,
+            "pi": self.pi,
+            "institution": self.institution,
+            "admins": self.admins,
+            "user_institutions": self.user_institutions,
+            "updated_at": self.updated_at.isoformat(),
+        }

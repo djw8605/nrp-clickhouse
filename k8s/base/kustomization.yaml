@@ -4,7 +4,6 @@ kind: Kustomization
 namespace: nrp-accounting
 
 resources:
-  - namespace.yaml
   - serviceaccount.yaml
   - configmap.yaml
   - secret.yaml

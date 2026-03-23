@@ -59,6 +59,7 @@ def _parse_clickhouse_host_and_port(raw_host: str, fallback_port: int) -> tuple[
 @dataclass(frozen=True)
 class Settings:
     PROMETHEUS_URL: str
+    PORTAL_RPC_URL: str
     CLICKHOUSE_HOST: str
     CLICKHOUSE_USER: str
     CLICKHOUSE_PASSWORD: str
@@ -69,6 +70,7 @@ class Settings:
     CLICKHOUSE_PORT: int
     CLICKHOUSE_SECURE: bool
     PROMETHEUS_TIMEOUT_SECONDS: float
+    PORTAL_TIMEOUT_SECONDS: float
     CLICKHOUSE_WRITE_BATCH_SIZE: int
 
 
@@ -81,6 +83,7 @@ def get_settings() -> Settings:
 
     return Settings(
         PROMETHEUS_URL=os.getenv("PROMETHEUS_URL", default_prometheus_url).rstrip("/"),
+        PORTAL_RPC_URL=os.getenv("PORTAL_RPC_URL", "https://portal.nrp.ai/rpc").rstrip("/"),
         CLICKHOUSE_HOST=clickhouse_host,
         CLICKHOUSE_USER=os.getenv("CLICKHOUSE_USER", "default"),
         CLICKHOUSE_PASSWORD=os.getenv("CLICKHOUSE_PASSWORD", ""),
@@ -91,5 +94,6 @@ def get_settings() -> Settings:
         CLICKHOUSE_PORT=clickhouse_port,
         CLICKHOUSE_SECURE=_env_bool("CLICKHOUSE_SECURE", False),
         PROMETHEUS_TIMEOUT_SECONDS=_env_float("PROMETHEUS_TIMEOUT_SECONDS", 60.0),
+        PORTAL_TIMEOUT_SECONDS=_env_float("PORTAL_TIMEOUT_SECONDS", 60.0),
         CLICKHOUSE_WRITE_BATCH_SIZE=_env_int("CLICKHOUSE_WRITE_BATCH_SIZE", 5000),
     )

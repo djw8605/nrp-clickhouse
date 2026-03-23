@@ -9,6 +9,7 @@ __all__ = [
     "etl",
     "backfill",
     "models",
+    "namespace_metadata",
     "logging_config",
     "institution_import",
 ]

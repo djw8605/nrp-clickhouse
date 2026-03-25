@@ -96,7 +96,7 @@ jobs:
           end_ts = int(datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc).timestamp() + 86400)
 
           url = f"{PROMETHEUS_URL}/api/v1/query?" + urllib.parse.urlencode(
-              {"query": f"namespace_allocated_resources@{end_ts}"}
+              {"query": f"max_over_time(namespace_allocated_resources[1d:1h]@{end_ts})"}
           )
           with urllib.request.urlopen(url, timeout=90) as r:
               payload = json.load(r)

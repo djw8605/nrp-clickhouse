@@ -68,7 +68,7 @@ def _instant_query(query: str) -> dict[str, Any]:
 
 def _fetch_allocated_resources() -> dict[str, Any]:
     """Run the production ETL query against real Prometheus."""
-    return _instant_query(f"namespace_allocated_resources@{_END_TS}")
+    return _instant_query(f"max_over_time(namespace_allocated_resources[1d:1h]@{_END_TS})")
 
 
 # Cache the live payload so we only hit Prometheus once per test session.

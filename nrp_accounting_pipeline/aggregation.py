@@ -17,6 +17,12 @@ DECIMAL_BYTES_PER_GB = 1_000_000_000.0
 SECONDS_PER_HOUR = 3600.0
 DEFAULT_DAY_SECONDS = 24 * 3600.0
 
+# The ETL subquery step size in minutes.  sum_over_time sums one sample per
+# step, so dividing by SAMPLES_PER_HOUR converts the raw sum to hourly units
+# (e.g. core-hours, gb-hours).
+SUBQUERY_STEP_MINUTES = 5
+SAMPLES_PER_HOUR = 60 / SUBQUERY_STEP_MINUTES
+
 _RESOURCE_TO_UNIT = {
     "cpu": "cpu_core_hours",
     "gpu": "gpu_hours",
@@ -183,9 +189,11 @@ def _series_usage_for_metric(metric_name: str, resource_name: str, points: list[
 
     if "namespace_allocated_resources" in metric:
         raw_value = sum(value for _, value in points)
+        # sum_over_time sums one sample per subquery step; divide by
+        # SAMPLES_PER_HOUR to convert to hourly units (core-hours, gb-hours).
         if normalized in {"memory", "storage"}:
-            return raw_value / DECIMAL_BYTES_PER_GB
-        return raw_value
+            return raw_value / DECIMAL_BYTES_PER_GB / SAMPLES_PER_HOUR
+        return raw_value / SAMPLES_PER_HOUR
 
     if normalized == "cpu":
         core_seconds = _integrate_as_step(points)

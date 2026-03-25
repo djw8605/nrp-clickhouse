@@ -81,7 +81,7 @@ Columns:
 ## What Data Goes Where
 
 - Source metric: `namespace_allocated_resources`
-- Daily query method: `max_over_time(namespace_allocated_resources[1d:1h]@end_ts)`
+- Daily query method: `sum_over_time(namespace_allocated_resources[1d:5m]@end_ts)`
 - Resource normalization:
   - `amd_com_xilinx* -> fpga`
   - `cpu -> cpu`
@@ -255,7 +255,7 @@ ORDER BY u.date DESC, u.namespace, u.node, u.resource;
 
 ## Reliability + Idempotency
 
-- Daily usage query via `max_over_time(namespace_allocated_resources[1d:1h]@end_ts)`
+- Daily usage query via `sum_over_time(namespace_allocated_resources[1d:5m]@end_ts)`
 - Retries with exponential backoff for Prometheus, `portal.nrp.ai`, and ClickHouse operations
 - Idempotent daily writes by deleting existing date rows before insert
 - Namespace metadata rows are inserted for new namespaces and updated when portal metadata changes

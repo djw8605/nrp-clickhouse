@@ -96,7 +96,7 @@ jobs:
           end_ts = int(datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc).timestamp() + 86400)
 
           url = f"{PROMETHEUS_URL}/api/v1/query?" + urllib.parse.urlencode(
-              {"query": f"max_over_time(namespace_allocated_resources[1d:1h]@{end_ts})"}
+              {"query": f"sum_over_time(namespace_allocated_resources[1d:5m]@{end_ts})"}
           )
           with urllib.request.urlopen(url, timeout=90) as r:
               payload = json.load(r)
@@ -106,7 +106,7 @@ jobs:
           print(f"Prometheus series returned: {len(series)}")
 
           annotated = sum(1 for s in series if s.get("metric", {}).get("annotation_nrp_ai_username", ""))
-          print(f"Series with annotation_nrp_ai_username: {annotated} (0 expected until label is >24h old)")
+          print(f"Series with annotation_nrp_ai_username: {annotated} (0 expected until label has been present for a full day)")
 
           results = {"namespace_allocated_resources": payload}
           pod_rows = aggregate_daily_metrics(results, target_date=target_date)

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 ALLOCATED_RESOURCES_QUERY_TEMPLATE = (
-    "max_over_time(namespace_allocated_resources[1d:1h]@{end_ts})"
+    "sum_over_time(namespace_allocated_resources[1d:5m]@{end_ts})"
 )
 
 

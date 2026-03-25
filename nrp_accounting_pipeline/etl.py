@@ -18,9 +18,7 @@ from .prometheus_client import query_prometheus
 logger = logging.getLogger(__name__)
 
 
-ALLOCATED_RESOURCES_QUERY_TEMPLATE = (
-    "sum_over_time(namespace_allocated_resources[1d:1h]@{end_ts})"
-)
+ALLOCATED_RESOURCES_QUERY_TEMPLATE = "namespace_allocated_resources@{end_ts}"
 
 
 def _parse_iso_date(value: str) -> date:

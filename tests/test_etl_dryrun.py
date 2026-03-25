@@ -8,15 +8,6 @@ These tests validate:
   4. Resource normalisation, namespace roll-up, and basic row counts
 
 No ClickHouse connection is required — all tests stop before any writes.
-
-Note on xfail tests
--------------------
-annotation_nrp_ai_username is a recently-added label.  The ETL query uses
-sum_over_time over a 24-hour subquery window; Prometheus only includes a
-label in the result when it has been consistently present throughout that
-entire window.  Tests that assert the annotation appears in aggregated rows
-are therefore marked xfail until every pod has carried the label for a full
-day, at which point they will automatically flip to passing (xpass).
 """
 from __future__ import annotations
 
@@ -57,15 +48,6 @@ _END_TS = int(
     + 86400
 )
 
-_ANNOTATION_XFAIL = pytest.mark.xfail(
-    reason=(
-        "annotation_nrp_ai_username is new; sum_over_time only carries a label "
-        "once it has been present in every sample across the full 24-hour window. "
-        "This test will pass automatically once the annotation has propagated."
-    ),
-    strict=False,
-)
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -86,8 +68,7 @@ def _instant_query(query: str) -> dict[str, Any]:
 
 def _fetch_allocated_resources() -> dict[str, Any]:
     """Run the production ETL query against real Prometheus."""
-    query = f"sum_over_time(namespace_allocated_resources[1d:1h]@{_END_TS})"
-    return _instant_query(query)
+    return _instant_query(f"namespace_allocated_resources@{_END_TS}")
 
 
 # Cache the live payload so we only hit Prometheus once per test session.
@@ -163,12 +144,11 @@ def test_etl_query_returns_data():
 
 
 @pytest.mark.timeout(90)
-@_ANNOTATION_XFAIL
 def test_annotation_label_present_in_etl_query():
     """
-    At least one series in the ETL sum_over_time result carries
-    annotation_nrp_ai_username.  This only holds once the label has been
-    present for a full 24-hour window in every pod's sample history.
+    At least one series returned by the ETL instant query carries
+    annotation_nrp_ai_username.  Pods without the annotation will be absent
+    from this set; that is expected and results in created_by='unknown'.
     """
     payload = _get_live_payload()
     series = payload["data"]["result"]
@@ -220,12 +200,11 @@ def test_aggregation_produces_namespace_rows(aggregated):
 
 
 @pytest.mark.timeout(120)
-@_ANNOTATION_XFAIL
 def test_aggregation_created_by_populated_from_annotation(aggregated):
     """
-    At least one row must have created_by set to a non-'unknown' value via
-    annotation_nrp_ai_username.  Passes once the annotation has propagated
-    across the full 24-hour sum_over_time window.
+    At least one row must have created_by set to a non-'unknown' value.
+    Pods without annotation_nrp_ai_username will have created_by='unknown';
+    that is expected and not a failure.
     """
     pod_rows, _ = aggregated
     non_unknown = [r for r in pod_rows if r.created_by != "unknown"]
@@ -241,7 +220,6 @@ def test_aggregation_created_by_populated_from_annotation(aggregated):
 
 
 @pytest.mark.timeout(120)
-@_ANNOTATION_XFAIL
 def test_aggregation_annotation_username_used_as_created_by(aggregated):
     """
     Usernames from annotation_nrp_ai_username appear verbatim in

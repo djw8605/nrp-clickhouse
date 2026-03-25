@@ -222,7 +222,8 @@ def aggregate_daily_metrics(
             namespace = labels.get("namespace") or "unknown"
             pod_name = labels.get("pod") or "unknown"
             created_by = (
-                labels.get("created_by")
+                labels.get("annotation_nrp_ai_username")
+                or labels.get("created_by")
                 or labels.get("created-by")
                 or labels.get("createdBy")
                 or "unknown"

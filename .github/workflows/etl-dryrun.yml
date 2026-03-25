@@ -95,20 +95,27 @@ jobs:
           target_date = date.today() - timedelta(days=1)
           end_ts = int(datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc).timestamp() + 86400)
 
-          query = f"sum_over_time(namespace_allocated_resources[1d:1h]@{end_ts})"
-          url = f"{PROMETHEUS_URL}/api/v1/query?" + urllib.parse.urlencode({"query": query})
-          with urllib.request.urlopen(url, timeout=90) as r:
-              payload = json.load(r)
+          def prom_query(query):
+              url = f"{PROMETHEUS_URL}/api/v1/query?" + urllib.parse.urlencode({"query": query})
+              with urllib.request.urlopen(url, timeout=90) as r:
+                  return json.load(r)
 
+          payload = prom_query(f"sum_over_time(namespace_allocated_resources[1d:1h]@{end_ts})")
           series = payload["data"]["result"]
           print(f"\n=== Aggregation Summary for {target_date} ===")
           print(f"Prometheus series returned: {len(series)}")
 
-          annotated = sum(1 for s in series if s.get("metric", {}).get("annotation_nrp_ai_username", ""))
-          print(f"Series with annotation_nrp_ai_username: {annotated}")
+          # Fetch annotation mapping separately (sum_over_time strips new labels)
+          ann_payload = prom_query("max by (namespace, annotation_nrp_ai_username) (namespace_allocated_resources)")
+          ns_annotations = {
+              s["metric"]["namespace"]: s["metric"]["annotation_nrp_ai_username"]
+              for s in ann_payload["data"]["result"]
+              if s.get("metric", {}).get("namespace") and s.get("metric", {}).get("annotation_nrp_ai_username")
+          }
+          print(f"Annotation lookup: {len(ns_annotations)} namespace→username mappings")
 
           results = {"namespace_allocated_resources": payload}
-          pod_rows = aggregate_daily_metrics(results, target_date=target_date)
+          pod_rows = aggregate_daily_metrics(results, target_date=target_date, namespace_annotations=ns_annotations)
           ns_rows = aggregate_namespace_usage(pod_rows)
 
           from collections import Counter

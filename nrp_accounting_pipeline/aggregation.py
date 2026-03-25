@@ -210,7 +210,18 @@ def _series_usage_for_metric(metric_name: str, resource_name: str, points: list[
 def aggregate_daily_metrics(
     results: Mapping[str, Mapping[str, Any]],
     target_date: date,
+    *,
+    namespace_annotations: Mapping[str, str] | None = None,
 ) -> list[PodUsageRecord]:
+    """Aggregate Prometheus results into PodUsageRecords.
+
+    ``namespace_annotations`` is an optional mapping of namespace →
+    annotation_nrp_ai_username fetched via a separate instant query.
+    It is used as a fallback when the label is absent from a series (which
+    happens because sum_over_time strips labels missing from historical
+    samples).
+    """
+    _ns_annotations: Mapping[str, str] = namespace_annotations or {}
     aggregated: dict[tuple[str, str, str, str, str, str], float] = defaultdict(float)
 
     for metric_name, payload in results.items():
@@ -226,6 +237,7 @@ def aggregate_daily_metrics(
                 or labels.get("created_by")
                 or labels.get("created-by")
                 or labels.get("createdBy")
+                or _ns_annotations.get(namespace)
                 or "unknown"
             )
             node = _extract_node_label(labels)

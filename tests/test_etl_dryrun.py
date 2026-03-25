@@ -149,29 +149,31 @@ def test_etl_query_returns_data():
 
 
 @pytest.mark.timeout(90)
-def test_annotation_label_present_in_etl_query():
+def test_annotation_lookup_query_returns_mapping():
     """
-    At least one series returned by the ETL query carries the
-    annotation_nrp_ai_username label with a non-empty value.
-    """
-    payload = _get_live_payload()
-    series = payload["data"]["result"]
+    The separate annotation lookup query returns a namespace → username mapping.
 
-    annotated = [
-        s for s in series
-        if s.get("metric", {}).get("annotation_nrp_ai_username", "")
-    ]
-    assert len(annotated) > 0, (
-        "No series in the ETL query result have annotation_nrp_ai_username set. "
-        "Sample labels from first 3 series: "
-        + str([s.get("metric", {}) for s in series[:3]])
+    NOTE: sum_over_time strips labels that were absent from historical samples,
+    so annotation_nrp_ai_username is intentionally fetched via a separate instant
+    query rather than from the ETL subquery result.
+    """
+    payload = _instant_query(
+        "max by (namespace, annotation_nrp_ai_username) (namespace_allocated_resources)"
     )
-    sample_usernames = [
-        s["metric"]["annotation_nrp_ai_username"] for s in annotated[:5]
-    ]
+    series = payload["data"]["result"]
+    mapping = {
+        s["metric"]["namespace"]: s["metric"]["annotation_nrp_ai_username"]
+        for s in series
+        if s.get("metric", {}).get("namespace") and s.get("metric", {}).get("annotation_nrp_ai_username")
+    }
+    assert len(mapping) > 0, (
+        "Annotation lookup query returned no namespace→username mappings. "
+        f"Series count: {len(series)}, sample metrics: {[s.get('metric') for s in series[:3]]}"
+    )
+    sample = list(mapping.items())[:3]
     print(
-        f"\n  [OK] {len(annotated)}/{len(series)} series carry "
-        f"annotation_nrp_ai_username (sample: {sample_usernames})"
+        f"\n  [OK] Annotation lookup: {len(mapping)} namespace→username mappings "
+        f"(sample: {sample})"
     )
 
 
@@ -180,12 +182,37 @@ def test_annotation_label_present_in_etl_query():
 # ---------------------------------------------------------------------------
 
 
+def _fetch_namespace_annotations() -> dict[str, str]:
+    """Fetch namespace → annotation_nrp_ai_username via the separate lookup query."""
+    payload = _instant_query(
+        "max by (namespace, annotation_nrp_ai_username) (namespace_allocated_resources)"
+    )
+    return {
+        s["metric"]["namespace"]: s["metric"]["annotation_nrp_ai_username"]
+        for s in payload["data"]["result"]
+        if s.get("metric", {}).get("namespace") and s.get("metric", {}).get("annotation_nrp_ai_username")
+    }
+
+
+_ns_annotations_cache: dict[str, str] | None = None
+
+
+def _get_namespace_annotations() -> dict[str, str]:
+    global _ns_annotations_cache
+    if _ns_annotations_cache is None:
+        _ns_annotations_cache = _fetch_namespace_annotations()
+    return _ns_annotations_cache
+
+
 @pytest.fixture(scope="module")
 def aggregated():
     """Run the full aggregation pipeline once; share the result across tests."""
     payload = _get_live_payload()
+    ns_annotations = _get_namespace_annotations()
     results = {"namespace_allocated_resources": payload}
-    pod_rows = aggregate_daily_metrics(results, target_date=TARGET_DATE)
+    pod_rows = aggregate_daily_metrics(
+        results, target_date=TARGET_DATE, namespace_annotations=ns_annotations
+    )
     namespace_rows = aggregate_namespace_usage(pod_rows)
     return pod_rows, namespace_rows
 
@@ -228,31 +255,22 @@ def test_aggregation_created_by_populated_from_annotation(aggregated):
 @pytest.mark.timeout(120)
 def test_aggregation_annotation_username_used_as_created_by(aggregated):
     """
-    Specifically verify rows where annotation_nrp_ai_username is the source —
-    i.e. the created_by value looks like a CILogon URI or contains typical
-    username patterns. Fails if zero annotation-sourced rows are found.
+    Verify that usernames from the annotation lookup query appear verbatim in
+    PodUsageRecord.created_by — proving the namespace_annotations fallback works.
     """
-    payload = _get_live_payload()
-    series = payload["data"]["result"]
-
-    # Collect expected usernames from the raw payload.
-    expected_usernames = {
-        s["metric"]["annotation_nrp_ai_username"]
-        for s in series
-        if s.get("metric", {}).get("annotation_nrp_ai_username", "")
-    }
-
-    if not expected_usernames:
+    ns_annotations = _get_namespace_annotations()
+    if not ns_annotations:
         pytest.skip("No annotation_nrp_ai_username values found in Prometheus — skipping")
 
+    expected_usernames = set(ns_annotations.values())
     pod_rows, _ = aggregated
     found_usernames = {r.created_by for r in pod_rows}
 
     matched = expected_usernames & found_usernames
     assert len(matched) > 0, (
         f"None of the annotation usernames appear in PodUsageRecord.created_by.\n"
-        f"  Expected (from Prometheus): {sorted(expected_usernames)[:5]}\n"
-        f"  Found in rows:              {sorted(found_usernames)[:5]}"
+        f"  Expected (from lookup query): {sorted(expected_usernames)[:5]}\n"
+        f"  Found in rows:               {sorted(found_usernames)[:5]}"
     )
     print(
         f"\n  [OK] {len(matched)} annotation username(s) found in aggregated rows "

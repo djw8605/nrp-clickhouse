@@ -22,6 +22,13 @@ ALLOCATED_RESOURCES_QUERY_TEMPLATE = (
     "sum_over_time(namespace_allocated_resources[1d:1h]@{end_ts})"
 )
 
+# Instant query that fetches the current namespace → username mapping.
+# sum_over_time drops labels that are absent from historical samples, so we
+# fetch the annotation separately and join it in during aggregation.
+NAMESPACE_ANNOTATION_QUERY = (
+    "max by (namespace, annotation_nrp_ai_username) (namespace_allocated_resources)"
+)
+
 
 def _parse_iso_date(value: str) -> date:
     return date.fromisoformat(value)
@@ -51,6 +58,33 @@ def _query_allocated_resources(
         retry_limit=settings.RETRY_LIMIT,
     )
     return {"namespace_allocated_resources": payload}
+
+
+def _query_namespace_annotations(*, settings: Settings) -> dict[str, str]:
+    """Return a mapping of namespace → annotation_nrp_ai_username.
+
+    sum_over_time strips labels that were absent from historical samples, so
+    we fetch the annotation via a plain instant query and join it into the
+    aggregation as a fallback for the created_by field.
+    """
+    payload = query_prometheus(
+        NAMESPACE_ANNOTATION_QUERY,
+        settings=settings,
+        timeout_seconds=settings.PROMETHEUS_TIMEOUT_SECONDS,
+        retry_limit=settings.RETRY_LIMIT,
+    )
+    mapping: dict[str, str] = {}
+    for series in payload.get("data", {}).get("result", []):
+        labels = series.get("metric", {})
+        namespace = labels.get("namespace", "")
+        username = labels.get("annotation_nrp_ai_username", "")
+        if namespace and username:
+            mapping[namespace] = username
+    logger.info(
+        "namespace_annotation_query_complete",
+        extra={"namespace_count": len(mapping)},
+    )
+    return mapping
 
 
 def _default_mock_file() -> Path:
@@ -103,6 +137,7 @@ def run_for_date(
             end_ts=end_ts,
             settings=active_settings,
         )
+        namespace_annotations = _query_namespace_annotations(settings=active_settings)
         failed_queries: dict[str, str] = {}
         query_duration = round(time.monotonic() - query_started, 3)
 
@@ -113,7 +148,9 @@ def run_for_date(
             )
 
         aggregation_started = time.monotonic()
-        pod_rows = aggregate_daily_metrics(results, target_date=target_date)
+        pod_rows = aggregate_daily_metrics(
+            results, target_date=target_date, namespace_annotations=namespace_annotations
+        )
         namespace_rows = aggregate_namespace_usage(pod_rows)
         aggregation_duration = round(time.monotonic() - aggregation_started, 3)
 

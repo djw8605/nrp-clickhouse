@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 ALLOCATED_RESOURCES_QUERY_TEMPLATE = (
-    "sum_over_time(namespace_allocated_resources[1d:1h]@{end_ts})"
+    "sum_over_time(namespace_allocated_resources[1d:5m]@{end_ts})"
 )
 
 
@@ -51,6 +51,7 @@ def _query_allocated_resources(
         retry_limit=settings.RETRY_LIMIT,
     )
     return {"namespace_allocated_resources": payload}
+
 
 
 def _default_mock_file() -> Path:

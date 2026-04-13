@@ -14,3 +14,4 @@ data:
   PROMETHEUS_TIMEOUT_SECONDS: "60"
   PORTAL_TIMEOUT_SECONDS: "60"
   CLICKHOUSE_WRITE_BATCH_SIZE: "5000"
+  INSTITUTION_CSV_URL: "https://raw.githubusercontent.com/djw8605/nrp-ror-labeler/refs/heads/main/node-institution.csv"

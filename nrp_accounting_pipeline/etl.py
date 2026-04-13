@@ -10,6 +10,7 @@ from typing import Any
 
 from .aggregation import aggregate_daily_metrics, aggregate_namespace_usage
 from .config import Settings, get_settings
+from .institution_import import download_and_import_institutions
 from .logging_config import configure_logging
 from .namespace_metadata import fetch_namespace_metadata, merge_namespace_metadata_rows
 from .prometheus_client import query_prometheus
@@ -132,12 +133,14 @@ def run_for_date(
         if skip_if_exists and not force_reprocess and has_data_for_date(
             clickhouse_client, target_date, active_settings
         ):
+            institution_rows = download_and_import_institutions(settings=active_settings)
             logger.info(
                 "etl_date_skipped_already_ingested",
                 extra={
                     "date": target_date.isoformat(),
                     "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
                     "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
+                    "institution_rows": institution_rows,
                 },
             )
             return {
@@ -147,6 +150,7 @@ def run_for_date(
                 "inserted_namespace_rows": 0,
                 "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
                 "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
+                "institution_rows": institution_rows,
                 "failed_queries": {},
             }
 
@@ -156,6 +160,8 @@ def run_for_date(
             clickhouse_client, namespace_rows, active_settings
         )
 
+        institution_rows = download_and_import_institutions(settings=active_settings)
+
         logger.info(
             "etl_run_complete",
             extra={
@@ -164,6 +170,7 @@ def run_for_date(
                 "inserted_namespace_rows": inserted_namespace_rows,
                 "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
                 "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
+                "institution_rows": institution_rows,
                 "query_duration_seconds": query_duration,
                 "aggregation_duration_seconds": aggregation_duration,
                 "failed_query_count": len(failed_queries),
@@ -177,6 +184,7 @@ def run_for_date(
             "inserted_namespace_rows": inserted_namespace_rows,
             "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
             "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
+            "institution_rows": institution_rows,
             "failed_queries": failed_queries,
         }
     finally:

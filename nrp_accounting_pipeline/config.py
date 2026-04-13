@@ -72,6 +72,7 @@ class Settings:
     PROMETHEUS_TIMEOUT_SECONDS: float
     PORTAL_TIMEOUT_SECONDS: float
     CLICKHOUSE_WRITE_BATCH_SIZE: int
+    INSTITUTION_CSV_URL: str | None
 
 
 @lru_cache(maxsize=1)
@@ -96,4 +97,5 @@ def get_settings() -> Settings:
         PROMETHEUS_TIMEOUT_SECONDS=_env_float("PROMETHEUS_TIMEOUT_SECONDS", 60.0),
         PORTAL_TIMEOUT_SECONDS=_env_float("PORTAL_TIMEOUT_SECONDS", 60.0),
         CLICKHOUSE_WRITE_BATCH_SIZE=_env_int("CLICKHOUSE_WRITE_BATCH_SIZE", 5000),
+        INSTITUTION_CSV_URL=os.getenv("INSTITUTION_CSV_URL") or None,
     )

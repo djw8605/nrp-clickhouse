@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import tempfile
+import time
 from pathlib import Path
 
 from .clickhouse_client import (
@@ -16,6 +18,101 @@ from .models import NodeInstitutionRecord
 
 
 logger = logging.getLogger(__name__)
+
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
+
+
+def download_institution_csv(
+    url: str,
+    *,
+    settings: Settings | None = None,
+    timeout_seconds: float = 60.0,
+    retry_limit: int | None = None,
+) -> Path:
+    if requests is None:
+        raise RuntimeError("requests is not installed. Install dependencies to download institution CSV.")
+
+    active_settings = settings or get_settings()
+    active_retry_limit = retry_limit or active_settings.RETRY_LIMIT
+    client = requests.Session()
+
+    for attempt in range(1, active_retry_limit + 1):
+        start_time = time.monotonic()
+        try:
+            response = client.get(url, timeout=timeout_seconds)
+            response.raise_for_status()
+            csv_content = response.text
+
+            elapsed = round(time.monotonic() - start_time, 3)
+            logger.info(
+                "institution_csv_download_complete",
+                extra={
+                    "attempt": attempt,
+                    "duration_seconds": elapsed,
+                    "url": url,
+                    "content_length": len(csv_content),
+                },
+            )
+
+            temp_file = tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".csv",
+                delete=False,
+                encoding="utf-8",
+            )
+            temp_file.write(csv_content)
+            temp_file.close()
+            return Path(temp_file.name)
+        except Exception as exc:  # noqa: BLE001
+            elapsed = round(time.monotonic() - start_time, 3)
+            logger.warning(
+                "institution_csv_download_failed",
+                extra={
+                    "attempt": attempt,
+                    "duration_seconds": elapsed,
+                    "error": str(exc),
+                    "url": url,
+                },
+            )
+            if attempt >= active_retry_limit:
+                raise
+
+            backoff_seconds = min(2 ** (attempt - 1), 30)
+            logger.info(
+                "institution_csv_download_retrying",
+                extra={
+                    "attempt": attempt,
+                    "retry_in_seconds": backoff_seconds,
+                    "url": url,
+                },
+            )
+            time.sleep(backoff_seconds)
+
+    raise RuntimeError("institution CSV download unexpectedly exhausted retries")
+
+
+def download_and_import_institutions(
+    *,
+    settings: Settings | None = None,
+) -> int:
+    active_settings = settings or get_settings()
+
+    if not active_settings.INSTITUTION_CSV_URL:
+        logger.info("institution_csv_url_not_configured")
+        return 0
+
+    csv_path = download_institution_csv(
+        active_settings.INSTITUTION_CSV_URL,
+        settings=active_settings,
+    )
+
+    try:
+        return run_import(csv_path, settings=active_settings)
+    finally:
+        csv_path.unlink(missing_ok=True)
 
 
 OSG_IDENTIFIER_COLUMN = "OSG Identifier"

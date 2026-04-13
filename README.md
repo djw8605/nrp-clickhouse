@@ -128,6 +128,7 @@ export MAX_QUERY_WORKERS=8
 export QUERY_STEP="1h"
 export RETRY_LIMIT=4
 export PORTAL_TIMEOUT_SECONDS=60
+export INSTITUTION_CSV_URL="https://raw.githubusercontent.com/djw8605/nrp-ror-labeler/refs/heads/main/node-institution.csv"
 ```
 
 `CLICKHOUSE_HOST` supports `host` or `host:port`. If a port is embedded in `CLICKHOUSE_HOST`, it takes precedence over `CLICKHOUSE_PORT`.
@@ -194,6 +195,13 @@ Run importer:
 
 ```bash
 python institution_import.py --csv /path/to/institution_mapping.csv
+```
+
+Or set the `INSTITUTION_CSV_URL` environment variable to import from a raw GitHub URL:
+
+```bash
+export INSTITUTION_CSV_URL="https://raw.githubusercontent.com/djw8605/nrp-ror-labeler/refs/heads/main/node-institution.csv"
+python institution_import.py
 ```
 
 This loads data into:

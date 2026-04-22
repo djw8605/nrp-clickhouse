@@ -165,6 +165,12 @@ The provided ingress follows the NRP HAProxy pattern:
 
 If you want a different public subdomain, update the `host` value in [ingress-mcp.yaml](/Users/derekweitzel/git/nrp-clickhouse/k8s/base/ingress-mcp.yaml) or patch it in an overlay before applying.
 
+Image pull behavior:
+
+- The manifests currently use the mutable `:latest` image tag.
+- To avoid stale cached images on Kubernetes nodes, ETL, backfill, and MCP workloads use `imagePullPolicy: Always`.
+- For production-grade releases, prefer replacing `latest` in the overlay with an immutable tag such as a Git SHA image tag from the GitHub Actions build.
+
 Run a one-time backfill job:
 
 1. Edit the date range in `k8s/backfill/backfill-job.yaml`

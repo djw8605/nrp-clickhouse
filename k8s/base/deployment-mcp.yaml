@@ -16,7 +16,7 @@ spec:
       containers:
         - name: mcp
           image: ghcr.io/djw8605/nrp-clickhouse:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - python
             - -m

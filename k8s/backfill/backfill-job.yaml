@@ -17,7 +17,7 @@ spec:
       containers:
         - name: backfill
           image: ghcr.io/djw8605/nrp-clickhouse:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command: ["python", "backfill.py"]
           args: ["--start", "2025-01-01", "--end", "2025-02-01"]
           envFrom:

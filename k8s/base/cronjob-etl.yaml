@@ -21,7 +21,7 @@ spec:
           containers:
             - name: etl
               image: ghcr.io/djw8605/nrp-clickhouse:latest
-              imagePullPolicy: IfNotPresent
+              imagePullPolicy: Always
               command: ["python", "etl.py"]
               envFrom:
                 - configMapRef:

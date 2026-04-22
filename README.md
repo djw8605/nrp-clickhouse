@@ -162,6 +162,7 @@ The provided ingress follows the NRP HAProxy pattern:
 - host `nrp-accounting-mcp.nrp-nautilus.io`
 - TLS enabled for that host
 - root path `/` routed to the MCP service
+- FastMCP DNS rebinding protection configured to allow that public host
 
 If you want a different public subdomain, update the `host` value in [ingress-mcp.yaml](/Users/derekweitzel/git/nrp-clickhouse/k8s/base/ingress-mcp.yaml) or patch it in an overlay before applying.
 
@@ -170,6 +171,12 @@ Image pull behavior:
 - The manifests currently use the mutable `:latest` image tag.
 - To avoid stale cached images on Kubernetes nodes, ETL, backfill, and MCP workloads use `imagePullPolicy: Always`.
 - For production-grade releases, prefer replacing `latest` in the overlay with an immutable tag such as a Git SHA image tag from the GitHub Actions build.
+
+MCP transport security:
+
+- The Python MCP SDK validates `Host` and `Origin` headers when DNS rebinding protection is enabled.
+- The Kubernetes config sets `MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS` so the public NRP ingress hostname is accepted.
+- If you change the ingress host, update those config values to match or the server will return `421 Invalid Host header`.
 
 Run a one-time backfill job:
 

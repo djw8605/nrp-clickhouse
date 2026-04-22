@@ -13,10 +13,12 @@ from .config import Settings, get_settings
 try:
     from mcp.server.fastmcp import Context, FastMCP
     from mcp.server.session import ServerSession
+    from mcp.server.transport_security import TransportSecuritySettings
 except ModuleNotFoundError:  # pragma: no cover - exercised in environments without deps
     Context = Any  # type: ignore[assignment]
     FastMCP = None
     ServerSession = Any  # type: ignore[assignment]
+    TransportSecuritySettings = Any  # type: ignore[assignment]
 
 
 @dataclass
@@ -44,7 +46,16 @@ def _require_fastmcp() -> Any:
     return FastMCP
 
 
+def _build_transport_security_settings(settings: Settings) -> Any:
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=settings.MCP_ENABLE_DNS_REBINDING_PROTECTION,
+        allowed_hosts=settings.MCP_ALLOWED_HOSTS,
+        allowed_origins=settings.MCP_ALLOWED_ORIGINS,
+    )
+
+
 _FastMCP = _require_fastmcp()
+_server_settings = get_settings()
 mcp = _FastMCP(
     "NRP Accounting",
     instructions=(
@@ -56,6 +67,7 @@ mcp = _FastMCP(
     stateless_http=True,
     json_response=True,
     streamable_http_path="/",
+    transport_security=_build_transport_security_settings(_server_settings),
 )
 
 

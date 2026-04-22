@@ -15,3 +15,6 @@ data:
   PORTAL_TIMEOUT_SECONDS: "60"
   CLICKHOUSE_WRITE_BATCH_SIZE: "5000"
   INSTITUTION_CSV_URL: "https://raw.githubusercontent.com/djw8605/nrp-ror-labeler/refs/heads/main/node-institution.csv"
+  MCP_ENABLE_DNS_REBINDING_PROTECTION: "true"
+  MCP_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,nrp-accounting-mcp.nrp-nautilus.io,nrp-accounting-mcp.nrp-nautilus.io:*"
+  MCP_ALLOWED_ORIGINS: "http://127.0.0.1:*,http://localhost:*,https://nrp-accounting-mcp.nrp-nautilus.io"

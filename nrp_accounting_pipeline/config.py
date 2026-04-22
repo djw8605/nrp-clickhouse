@@ -38,6 +38,19 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _env_csv(name: str, default: tuple[str, ...] = ()) -> list[str]:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return list(default)
+
+    values: list[str] = []
+    for part in raw.split(","):
+        value = part.strip()
+        if value:
+            values.append(value)
+    return values
+
+
 def _parse_clickhouse_host_and_port(raw_host: str, fallback_port: int) -> tuple[str, int]:
     host_value = (raw_host or default_clickhouse_host).strip()
     if not host_value:
@@ -73,6 +86,9 @@ class Settings:
     PORTAL_TIMEOUT_SECONDS: float
     CLICKHOUSE_WRITE_BATCH_SIZE: int
     INSTITUTION_CSV_URL: str | None
+    MCP_ENABLE_DNS_REBINDING_PROTECTION: bool
+    MCP_ALLOWED_HOSTS: list[str]
+    MCP_ALLOWED_ORIGINS: list[str]
 
 
 @lru_cache(maxsize=1)
@@ -98,4 +114,25 @@ def get_settings() -> Settings:
         PORTAL_TIMEOUT_SECONDS=_env_float("PORTAL_TIMEOUT_SECONDS", 60.0),
         CLICKHOUSE_WRITE_BATCH_SIZE=_env_int("CLICKHOUSE_WRITE_BATCH_SIZE", 5000),
         INSTITUTION_CSV_URL=os.getenv("INSTITUTION_CSV_URL") or None,
+        MCP_ENABLE_DNS_REBINDING_PROTECTION=_env_bool(
+            "MCP_ENABLE_DNS_REBINDING_PROTECTION",
+            True,
+        ),
+        MCP_ALLOWED_HOSTS=_env_csv(
+            "MCP_ALLOWED_HOSTS",
+            default=(
+                "127.0.0.1:*",
+                "localhost:*",
+                "nrp-accounting-mcp.nrp-nautilus.io",
+                "nrp-accounting-mcp.nrp-nautilus.io:*",
+            ),
+        ),
+        MCP_ALLOWED_ORIGINS=_env_csv(
+            "MCP_ALLOWED_ORIGINS",
+            default=(
+                "http://127.0.0.1:*",
+                "http://localhost:*",
+                "https://nrp-accounting-mcp.nrp-nautilus.io",
+            ),
+        ),
     )

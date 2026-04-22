@@ -1,3 +1,4 @@
 clickhouse-connect>=0.7.0
 requests>=2.31.0
 cityhash>=0.4.7
+mcp[cli]>=1.0.0,<2.0.0

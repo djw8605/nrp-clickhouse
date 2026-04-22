@@ -135,7 +135,7 @@ export INSTITUTION_CSV_URL="https://raw.githubusercontent.com/djw8605/nrp-ror-la
 
 ## Kubernetes (Kustomize)
 
-ClickHouse is intentionally not deployed here. These manifests deploy only the ETL/backfill pipeline.
+ClickHouse is intentionally not deployed here. These manifests deploy the ETL/backfill pipeline plus an MCP query service.
 
 Apply production overlay:
 
@@ -148,6 +148,22 @@ Files to customize before apply:
 - `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`
 - `k8s/overlays/prod/kustomization.yaml`: set your pipeline image name/tag
 - `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, and runtime tuning values
+
+Deployed components:
+
+- `CronJob/nrp-accounting-etl`: daily accounting ETL
+- `Deployment/nrp-accounting-mcp`: read-only MCP server over streamable HTTP
+- `Service/nrp-accounting-mcp`: cluster-internal service on port `8000`
+- `Ingress/nrp-accounting-mcp`: external HAProxy ingress for `https://nrp-accounting-mcp.nrp-nautilus.io/`
+
+The provided ingress follows the NRP HAProxy pattern:
+
+- `ingressClassName: haproxy`
+- host `nrp-accounting-mcp.nrp-nautilus.io`
+- TLS enabled for that host
+- root path `/` routed to the MCP service
+
+If you want a different public subdomain, update the `host` value in [ingress-mcp.yaml](/Users/derekweitzel/git/nrp-clickhouse/k8s/base/ingress-mcp.yaml) or patch it in an overlay before applying.
 
 Run a one-time backfill job:
 
@@ -181,6 +197,50 @@ python backfill.py --start 2025-01-01 --end 2025-02-01
 ```
 
 Backfill runs dates sequentially and is safe to restart.
+
+## MCP Server
+
+This repo also includes a read-only MCP server for querying accounting usage from ClickHouse.
+
+Run over stdio:
+
+```bash
+python3 -m nrp_accounting_pipeline.mcp_server
+```
+
+Run over streamable HTTP:
+
+```bash
+python3 -m nrp_accounting_pipeline.mcp_server --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+Primary tool:
+
+- `query_resource_usage`
+
+Supported filters:
+
+- `namespace`: one namespace or a list of namespaces
+- `institution`: namespace institution from `namespace_metadata_mapping`
+- `node`: one node name or a list of node names
+- `node_regex`: ClickHouse regex matched against `node`
+- `node_institution`: institution from `node_institution_mapping`
+- `resource`: normalized resource name such as `cpu`, `gpu`, `memory`, `storage`, `fpga`
+- `granularity`: `namespace` or `pod`
+- `group_by`: any of `date`, `namespace`, `institution`, `pi`, `node`, `node_institution`, `created_by`, `resource`, `unit`, and `pod_name` (pod granularity only)
+
+Date behavior:
+
+- If `start_date` and `end_date` are both omitted, the tool queries the most recent ingested date.
+- If only one of them is supplied, the query is treated as a single-day lookup.
+
+Example prompt/tool call intent:
+
+- "Show GPU usage for namespace `foo` on the latest ingested day"
+- "Sum memory usage for institution `Delta University` between `2026-04-01` and `2026-04-07`"
+- "Find usage on nodes matching `^gpu-node-` grouped by namespace and resource"
+
+When deployed with the included Kubernetes ingress, external MCP clients should connect to `https://nrp-accounting-mcp.nrp-nautilus.io/`.
 
 ## Institution Mapping CSV Import
 

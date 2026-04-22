@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nrp-accounting-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: mcp
+    spec:
+      serviceAccountName: nrp-accounting-pipeline
+      containers:
+        - name: mcp
+          image: ghcr.io/djw8605/nrp-clickhouse:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - nrp_accounting_pipeline.mcp_server
+            - --transport
+            - streamable-http
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+          envFrom:
+            - configMapRef:
+                name: nrp-accounting-config
+            - secretRef:
+                name: nrp-accounting-secrets
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

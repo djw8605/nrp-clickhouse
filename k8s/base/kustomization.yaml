@@ -8,6 +8,9 @@ resources:
   - configmap.yaml
   - secret.yaml
   - cronjob-etl.yaml
+  - deployment-mcp.yaml
+  - service-mcp.yaml
+  - ingress-mcp.yaml
 
 labels:
   - pairs:

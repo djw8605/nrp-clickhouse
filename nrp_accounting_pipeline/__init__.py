@@ -12,4 +12,6 @@ __all__ = [
     "namespace_metadata",
     "logging_config",
     "institution_import",
+    "accounting_queries",
+    "mcp_server",
 ]

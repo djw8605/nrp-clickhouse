@@ -73,6 +73,8 @@ mcp = _FastMCP(
         "Read-only access to NRP accounting usage data stored in ClickHouse. "
         "Use the focused tools for common accounting questions like latest data date, "
         "active namespaces, top consumers, filter discovery, timeseries, and namespace details. "
+        "Resource arguments use canonical names like gpu, cpu, memory, storage, fpga, and network. "
+        "Common aliases like gpu_hours, gpu-hours, GPU hours, and cpu_core_hours are normalized automatically. "
         "Use query_resource_usage for custom aggregations."
     ),
     lifespan=app_lifespan,
@@ -102,6 +104,11 @@ def query_resource_usage(
 
     If start_date and end_date are both omitted, the tool uses the most recent ingested date.
     If only one of start_date or end_date is provided, it is treated as a single-day query.
+
+    Resource inputs should use canonical names like gpu or cpu. For example, use resource='gpu' for
+    GPU-hours queries, not resource='gpu_hours'. Common aliases such as gpu_hours, gpu-hours, GPU
+    hours, and cpu_core_hours are accepted and normalized automatically. The unit is returned
+    separately in the unit field, for example resource='gpu' yields unit='gpu_hours'.
 
     Supported group_by values:
     - date
@@ -242,7 +249,12 @@ def top_resource_consumers(
     node_institution: str | list[str] | None = None,
     limit: int = 10,
 ) -> dict[str, object]:
-    """Rank the top namespaces, institutions, or nodes for a specific resource."""
+    """Rank the top namespaces, institutions, or nodes for a specific resource.
+
+    Use canonical resource names like gpu or cpu. For example, use resource='gpu' for GPU-hours
+    ranking, not resource='gpu_hours'. Common aliases such as gpu_hours, gpu-hours, GPU hours, and
+    cpu_core_hours are accepted and normalized automatically.
+    """
     app_context = ctx.request_context.lifespan_context
     return run_top_resource_consumers(
         app_context.client,
@@ -272,7 +284,12 @@ def get_usage_timeseries(
     granularity: str = "namespace",
     limit: int = 366,
 ) -> dict[str, object]:
-    """Get a daily usage trend for one namespace, institution, node, or node-institution value."""
+    """Get a daily usage trend for one namespace, institution, node, or node-institution value.
+
+    Resource inputs use canonical names like gpu or cpu. For example, use resource='gpu' for GPU
+    trends, not resource='gpu_hours'. Common aliases such as gpu_hours and cpu_core_hours are
+    accepted and normalized automatically.
+    """
     app_context = ctx.request_context.lifespan_context
     return run_get_usage_timeseries(
         app_context.client,
@@ -295,7 +312,12 @@ def get_namespace_summary(
     end_date: str | None = None,
     resource: str | None = None,
 ) -> dict[str, object]:
-    """Get a namespace summary grouped by resource and unit."""
+    """Get a namespace summary grouped by resource and unit.
+
+    If resource is provided, use a canonical resource name like gpu or cpu. For example, use
+    resource='gpu' for GPU-hours summaries, not resource='gpu_hours'. Common aliases such as
+    gpu_hours and cpu_core_hours are accepted and normalized automatically.
+    """
     app_context = ctx.request_context.lifespan_context
     return run_get_namespace_summary(
         app_context.client,
@@ -315,7 +337,12 @@ def get_namespace_daily_trend(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, object]:
-    """Get a namespace's daily trend, defaulting to the last 30 days when no dates are supplied."""
+    """Get a namespace's daily trend, defaulting to the last 30 days when no dates are supplied.
+
+    If resource is provided, use a canonical resource name like gpu or cpu. For example, use
+    resource='gpu' for GPU-hours trends, not resource='gpu_hours'. Common aliases such as
+    gpu_hours and cpu_core_hours are accepted and normalized automatically.
+    """
     app_context = ctx.request_context.lifespan_context
     return run_get_namespace_daily_trend(
         app_context.client,
@@ -336,7 +363,12 @@ def top_nodes_for_namespace(
     end_date: str | None = None,
     limit: int = 10,
 ) -> dict[str, object]:
-    """Rank the highest-usage nodes for one namespace and one resource."""
+    """Rank the highest-usage nodes for one namespace and one resource.
+
+    Use canonical resource names like gpu or cpu. For example, use resource='gpu' for GPU-hours
+    node ranking, not resource='gpu_hours'. Common aliases such as gpu_hours, gpu-hours, GPU hours,
+    and cpu_core_hours are accepted and normalized automatically.
+    """
     app_context = ctx.request_context.lifespan_context
     return run_top_nodes_for_namespace(
         app_context.client,

@@ -6,6 +6,7 @@ from decimal import Decimal
 import re
 from typing import Any, Sequence
 
+from .aggregation import normalize_resource as normalize_metric_resource
 from .config import Settings, get_settings
 from .schema import (
     NAMESPACE_METADATA_TABLE_NAME,
@@ -22,6 +23,59 @@ DEFAULT_TREND_DAYS = 30
 DEFAULT_DISCOVERY_LIMIT = 100
 DEFAULT_TOP_LIMIT = 10
 DEFAULT_ACTIVE_NAMESPACE_LIMIT = MAX_RESULT_LIMIT
+
+_CANONICAL_RESOURCE_VALUES = (
+    "cpu",
+    "gpu",
+    "fpga",
+    "memory",
+    "storage",
+    "network",
+    "other",
+)
+
+_RESOURCE_INPUT_ALIASES = {
+    "cpu": "cpu",
+    "cpu_core_hour": "cpu",
+    "cpu_core_hours": "cpu",
+    "cpu_hour": "cpu",
+    "cpu_hours": "cpu",
+    "gpu": "gpu",
+    "gpu_hour": "gpu",
+    "gpu_hours": "gpu",
+    "fpga": "fpga",
+    "fpga_hour": "fpga",
+    "fpga_hours": "fpga",
+    "memory": "memory",
+    "memory_gb": "memory",
+    "memory_gb_hour": "memory",
+    "memory_gb_hours": "memory",
+    "ram": "memory",
+    "ram_gb": "memory",
+    "ram_gb_hour": "memory",
+    "ram_gb_hours": "memory",
+    "storage": "storage",
+    "storage_gb": "storage",
+    "storage_gb_hour": "storage",
+    "storage_gb_hours": "storage",
+    "ephemeral_storage": "storage",
+    "disk": "storage",
+    "disk_gb": "storage",
+    "disk_gb_hour": "storage",
+    "disk_gb_hours": "storage",
+    "network": "network",
+    "network_gb": "network",
+    "network_receive": "network",
+    "network_transmit": "network",
+    "other": "other",
+}
+
+_RESOURCE_ALIAS_EXAMPLES = (
+    "gpu_hours -> gpu",
+    "gpu-hours -> gpu",
+    "GPU hours -> gpu",
+    "cpu_core_hours -> cpu",
+)
 
 DEFAULT_GROUP_BY: dict[str, list[str]] = {
     "namespace": ["date", "namespace", "institution", "node", "resource", "unit"],
@@ -108,6 +162,66 @@ def _normalize_string_list(value: str | Sequence[str] | None) -> list[str]:
             continue
         normalized.append(item)
         seen.add(item)
+
+    return normalized
+
+
+def _resource_alias_key(value: str) -> str:
+    key = (value or "").strip().lower()
+    key = re.sub(r"[\s\-/]+", "_", key)
+    key = re.sub(r"_+", "_", key)
+    return key.strip("_")
+
+
+def _normalize_resource_value(value: str) -> str:
+    alias_key = _resource_alias_key(value)
+    if not alias_key:
+        raise ValueError("resource values must be non-empty strings")
+
+    direct_match = _RESOURCE_INPUT_ALIASES.get(alias_key)
+    if direct_match is not None:
+        return direct_match
+
+    normalized_metric = normalize_metric_resource(value)
+    if normalized_metric != "other":
+        # Allow raw metric names and vendor-specific labels from Prometheus-style inputs.
+        if any(
+            token in alias_key
+            for token in (
+                "nvidia_com",
+                "amd_com_xilinx",
+                "network_receive",
+                "network_transmit",
+                "fs_usage",
+            )
+        ):
+            return normalized_metric
+
+    allowed = ", ".join(_CANONICAL_RESOURCE_VALUES)
+    examples = "; ".join(_RESOURCE_ALIAS_EXAMPLES)
+    raise ValueError(
+        f"Unsupported resource {value!r}. Use one of: {allowed}. "
+        f"Common aliases are normalized automatically: {examples}."
+    )
+
+
+def _normalize_resource_list(value: str | Sequence[str] | None) -> list[str]:
+    if value is None:
+        return []
+
+    raw_values = [value] if isinstance(value, str) else list(value)
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for raw_value in raw_values:
+        item = str(raw_value).strip()
+        if not item:
+            continue
+        canonical = _normalize_resource_value(item)
+        if canonical in seen:
+            continue
+        normalized.append(canonical)
+        seen.add(canonical)
 
     return normalized
 
@@ -271,6 +385,13 @@ def _require_single_filter_value(name: str, value: str | Sequence[str] | None) -
     return values[0]
 
 
+def _require_single_resource_value(value: str | Sequence[str] | None) -> str:
+    values = _normalize_resource_list(value)
+    if len(values) != 1:
+        raise ValueError("resource requires exactly one value")
+    return values[0]
+
+
 def _maybe_add_in_filter(
     clauses: list[str],
     *,
@@ -410,7 +531,7 @@ def build_resource_usage_query(
     institution_filters = _normalize_string_list(institution)
     node_filters = _normalize_string_list(node)
     node_institution_filters = _normalize_string_list(node_institution)
-    resource_filters = _normalize_string_list(resource)
+    resource_filters = _normalize_resource_list(resource)
 
     _validate_resource_safety(normalized_group_by, resource_filters)
 
@@ -633,7 +754,7 @@ def _list_distinct_dimension_values(
         node_filters=_normalize_string_list(node),
         node_regex=node_regex,
         node_institution_filters=_normalize_string_list(node_institution),
-        resource_filters=_normalize_string_list(resource),
+        resource_filters=_normalize_resource_list(resource),
         extra_clauses=extra_clauses,
     )
 
@@ -745,7 +866,7 @@ def top_resource_consumers(
         _TOP_DIMENSIONS,
         granularity=safe_granularity,
     )
-    safe_resource = _require_single_filter_value("resource", resource)
+    safe_resource = _require_single_resource_value(resource)
     safe_limit = _validate_limit(limit, default=DEFAULT_TOP_LIMIT)
     active_settings = settings or get_settings()
     start_day, end_day = _resolve_date_window(
@@ -818,7 +939,7 @@ def get_usage_timeseries(
         _TIMESERIES_DIMENSIONS,
         granularity=safe_granularity,
     )
-    safe_resource = _require_single_filter_value("resource", resource)
+    safe_resource = _require_single_resource_value(resource)
     safe_limit = _validate_limit(limit, default=366)
     active_settings = settings or get_settings()
     start_day, end_day = _resolve_date_window_with_default_days(

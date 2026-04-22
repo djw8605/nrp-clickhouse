@@ -259,7 +259,10 @@ Supported filters:
 - `node`: one node name or a list of node names
 - `node_regex`: ClickHouse regex matched against `node`
 - `node_institution`: institution from `node_institution_mapping`
-- `resource`: normalized resource name such as `cpu`, `gpu`, `memory`, `storage`, `fpga`
+- `resource`: normalized resource name such as `cpu`, `gpu`, `memory`, `storage`, `fpga`, `network`
+- Resource aliases like `gpu_hours`, `gpu-hours`, `GPU hours`, and `cpu_core_hours` are accepted and normalized automatically
+- For example, use `resource=gpu` for GPU-hours queries and `resource=cpu` for CPU core-hour queries; units come back separately
+- Units are returned separately in the `unit` field, for example `resource=gpu` yields `unit=gpu_hours`
 - `granularity`: `namespace` or `pod`
 - `group_by`: any of `date`, `namespace`, `institution`, `pi`, `node`, `node_institution`, `created_by`, `resource`, `unit`, and `pod_name` (pod granularity only)
 
@@ -269,6 +272,7 @@ Date behavior:
 - If only one of them is supplied, the query is treated as a single-day lookup.
 - Trend-oriented tools default to the last 30 days when no dates are supplied.
 - `list_active_namespaces` also defaults to the last 30 days when no dates are supplied.
+- Unknown resource inputs now return a validation error instead of silently producing empty rows.
 
 Discovery behavior:
 

@@ -92,6 +92,40 @@ def test_build_resource_usage_query_applies_filters_and_latest_date_default() ->
     assert spec.group_by == ["namespace", "institution", "node", "resource", "unit"]
 
 
+def test_build_resource_usage_query_normalizes_resource_aliases() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+        ]
+    )
+
+    spec = build_resource_usage_query(
+        client,
+        resource=["gpu-hours", "cpu_core_hours"],
+        group_by=["namespace", "resource", "unit"],
+        settings=TEST_SETTINGS,
+    )
+
+    assert "usage.resource IN ('gpu', 'cpu')" in spec.sql
+
+
+def test_build_resource_usage_query_rejects_unknown_resource_values() -> None:
+    client = PatternClient([])
+
+    with pytest.raises(ValueError, match="Unsupported resource 'gpu-hours-total'"):
+        build_resource_usage_query(
+            client,
+            start_date="2026-04-20",
+            end_date="2026-04-21",
+            resource="gpu-hours-total",
+            group_by=["namespace", "resource", "unit"],
+            settings=TEST_SETTINGS,
+        )
+
+
 def test_build_resource_usage_query_requires_resource_dimension_when_multiple_resources() -> None:
     client = PatternClient([])
 
@@ -278,6 +312,33 @@ def test_top_resource_consumers_returns_ranked_rows() -> None:
     assert result["row_count"] == 2
     assert result["rows"][0]["institution"] == "Delta University"
     assert result["rows"][0]["usage"] == 17.25
+
+
+def test_top_resource_consumers_normalizes_resource_alias_to_canonical_value() -> None:
+    client = PatternClient(
+        [
+            (
+                "usage.resource IN ('gpu')",
+                FakeQueryResult(
+                    [("demo-ns", "gpu_hours", Decimal("17.250000"))],
+                    ["namespace", "unit", "usage"],
+                ),
+            ),
+        ]
+    )
+
+    result = top_resource_consumers(
+        client,
+        dimension="namespace",
+        resource="GPU hours",
+        start_date="2026-04-20",
+        end_date="2026-04-21",
+        limit=5,
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["resource"] == "gpu"
+    assert result["rows"][0]["unit"] == "gpu_hours"
 
 
 def test_get_usage_timeseries_defaults_to_last_30_days() -> None:

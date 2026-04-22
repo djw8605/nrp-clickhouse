@@ -8,6 +8,7 @@ from typing import Any
 
 from .accounting_queries import (
     get_latest_data_date as run_get_latest_data_date,
+    list_active_namespaces as run_list_active_namespaces,
     get_namespace_daily_trend as run_get_namespace_daily_trend,
     get_namespace_details as run_get_namespace_details,
     get_namespace_summary as run_get_namespace_summary,
@@ -71,7 +72,7 @@ mcp = _FastMCP(
     instructions=(
         "Read-only access to NRP accounting usage data stored in ClickHouse. "
         "Use the focused tools for common accounting questions like latest data date, "
-        "top consumers, filter discovery, timeseries, and namespace details. "
+        "active namespaces, top consumers, filter discovery, timeseries, and namespace details. "
         "Use query_resource_usage for custom aggregations."
     ),
     lifespan=app_lifespan,
@@ -163,7 +164,12 @@ def list_filter_values(
     regex: str | None = None,
     limit: int = 100,
 ) -> dict[str, object]:
-    """List valid values for common filter dimensions like namespace, institution, node, and resource."""
+    """List distinct values observed in accounting usage rows for the filtered date range.
+
+    This is not a static catalog lookup. The returned values come from actual usage rows that match
+    the requested filters and date window. If start_date and end_date are omitted, the tool defaults
+    to the latest ingested day. Check is_truncated and total_count when you need a complete list.
+    """
     app_context = ctx.request_context.lifespan_context
     return run_list_filter_values(
         app_context.client,
@@ -172,6 +178,43 @@ def list_filter_values(
         start_date=start_date,
         end_date=end_date,
         namespace=namespace,
+        institution=institution,
+        node=node,
+        node_regex=node_regex,
+        node_institution=node_institution,
+        resource=resource,
+        prefix=prefix,
+        regex=regex,
+        limit=limit,
+        settings=app_context.settings,
+    )
+
+
+@mcp.tool()
+def list_active_namespaces(
+    ctx: Context[ServerSession, AppContext],
+    start_date: str | None = None,
+    end_date: str | None = None,
+    institution: str | list[str] | None = None,
+    node: str | list[str] | None = None,
+    node_regex: str | None = None,
+    node_institution: str | list[str] | None = None,
+    resource: str | list[str] | None = None,
+    prefix: str | None = None,
+    regex: str | None = None,
+    limit: int = 5000,
+) -> dict[str, object]:
+    """List namespaces that had observed accounting usage in a date window.
+
+    If start_date and end_date are omitted, this tool defaults to the last 30 days ending on the
+    latest ingested accounting date. Use this for prompts like "what namespaces had usage this
+    month?" or "list active namespaces last week".
+    """
+    app_context = ctx.request_context.lifespan_context
+    return run_list_active_namespaces(
+        app_context.client,
+        start_date=start_date,
+        end_date=end_date,
         institution=institution,
         node=node,
         node_regex=node_regex,

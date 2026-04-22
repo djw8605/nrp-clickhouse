@@ -9,6 +9,7 @@ import pytest
 from nrp_accounting_pipeline.accounting_queries import (
     build_resource_usage_query,
     get_latest_data_date,
+    list_active_namespaces,
     get_namespace_details,
     get_namespace_summary,
     get_usage_timeseries,
@@ -180,6 +181,10 @@ def test_list_filter_values_returns_distinct_dimension_values() -> None:
     client = PatternClient(
         [
             (
+                "SELECT count() AS total_count FROM ( SELECT DISTINCT coalesce(meta.institution, 'Unknown') AS value",
+                FakeQueryResult([(2,)], ["total_count"]),
+            ),
+            (
                 "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
                 FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
             ),
@@ -204,7 +209,42 @@ def test_list_filter_values_returns_distinct_dimension_values() -> None:
     assert result["dimension"] == "institution"
     assert result["start_date"] == "2026-04-21"
     assert result["values"] == ["Delta University", "Other University"]
+    assert result["total_count"] == 2
+    assert result["is_truncated"] is False
+    assert result["value_source"] == "observed_usage_rows"
     assert "LIKE 'D%'" in client.queries[-1]
+
+
+def test_list_active_namespaces_defaults_to_last_30_days_and_reports_truncation() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+            (
+                "SELECT count() AS total_count FROM ( SELECT DISTINCT usage.namespace AS value",
+                FakeQueryResult([(3,)], ["total_count"]),
+            ),
+            (
+                "SELECT DISTINCT usage.namespace AS value",
+                FakeQueryResult(
+                    [("alpha-ns",), ("beta-ns",)],
+                    ["value"],
+                ),
+            ),
+        ]
+    )
+
+    result = list_active_namespaces(client, settings=TEST_SETTINGS, limit=2)
+
+    assert result["start_date"] == "2026-03-23"
+    assert result["end_date"] == "2026-04-21"
+    assert result["count"] == 2
+    assert result["total_count"] == 3
+    assert result["is_truncated"] is True
+    assert result["value_source"] == "observed_usage_rows"
+    assert result["namespaces"] == ["alpha-ns", "beta-ns"]
 
 
 def test_top_resource_consumers_returns_ranked_rows() -> None:

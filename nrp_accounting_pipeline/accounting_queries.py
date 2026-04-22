@@ -21,6 +21,7 @@ MAX_RESULT_LIMIT = 5000
 DEFAULT_TREND_DAYS = 30
 DEFAULT_DISCOVERY_LIMIT = 100
 DEFAULT_TOP_LIMIT = 10
+DEFAULT_ACTIVE_NAMESPACE_LIMIT = MAX_RESULT_LIMIT
 
 DEFAULT_GROUP_BY: dict[str, list[str]] = {
     "namespace": ["date", "namespace", "institution", "node", "resource", "unit"],
@@ -370,6 +371,13 @@ def _query_rows(
     return rows
 
 
+def _query_scalar(client, sql: str) -> Any:
+    result = client.query(sql)
+    if not result.result_rows:
+        return None
+    return result.result_rows[0][0]
+
+
 def build_resource_usage_query(
     client,
     *,
@@ -537,21 +545,70 @@ def list_filter_values(
     limit: int | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
+    return _list_distinct_dimension_values(
+        client,
+        dimension=dimension,
+        granularity=granularity,
+        start_date=start_date,
+        end_date=end_date,
+        namespace=namespace,
+        institution=institution,
+        node=node,
+        node_regex=node_regex,
+        node_institution=node_institution,
+        resource=resource,
+        prefix=prefix,
+        regex=regex,
+        limit=limit,
+        settings=settings,
+    )
+
+
+def _list_distinct_dimension_values(
+    client,
+    *,
+    dimension: str,
+    granularity: str = "namespace",
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+    namespace: str | Sequence[str] | None = None,
+    institution: str | Sequence[str] | None = None,
+    node: str | Sequence[str] | None = None,
+    node_regex: str | None = None,
+    node_institution: str | Sequence[str] | None = None,
+    resource: str | Sequence[str] | None = None,
+    prefix: str | None = None,
+    regex: str | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+    default_days: int | None = None,
+    default_limit: int = DEFAULT_DISCOVERY_LIMIT,
+) -> dict[str, Any]:
     safe_granularity = _validate_granularity(granularity)
     safe_dimension = _validate_dimension(
         dimension,
         _LISTABLE_DIMENSIONS,
         granularity=safe_granularity,
     )
-    safe_limit = _validate_limit(limit, default=DEFAULT_DISCOVERY_LIMIT)
+    safe_limit = _validate_limit(limit, default=default_limit)
     active_settings = settings or get_settings()
-    start_day, end_day = _resolve_date_window(
-        client,
-        granularity=safe_granularity,
-        settings=active_settings,
-        start_date=start_date,
-        end_date=end_date,
-    )
+    if default_days is None:
+        start_day, end_day = _resolve_date_window(
+            client,
+            granularity=safe_granularity,
+            settings=active_settings,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    else:
+        start_day, end_day = _resolve_date_window_with_default_days(
+            client,
+            granularity=safe_granularity,
+            settings=active_settings,
+            start_date=start_date,
+            end_date=end_date,
+            default_days=default_days,
+        )
 
     if regex:
         re.compile(regex)
@@ -580,18 +637,31 @@ def list_filter_values(
         extra_clauses=extra_clauses,
     )
 
-    sql = f"""
-SELECT DISTINCT
-  {dimension_expression} AS value
+    from_and_where_sql = f"""
 FROM {usage_table} AS usage
 LEFT JOIN {metadata_table} AS meta ON usage.namespace = meta.namespace
 LEFT JOIN {node_institution_table} AS node_map ON usage.node = node_map.node
 WHERE {" AND ".join(where_clauses)}
+""".strip()
+
+    sql = f"""
+SELECT DISTINCT
+  {dimension_expression} AS value
+{from_and_where_sql}
 ORDER BY value
 LIMIT {safe_limit}
 """.strip()
     rows = _query_rows(client, sql, ["value"])
     values = [row["value"] for row in rows]
+    total_count_sql = f"""
+SELECT count() AS total_count
+FROM (
+  SELECT DISTINCT
+    {dimension_expression} AS value
+  {from_and_where_sql}
+)
+""".strip()
+    total_count = int(_query_scalar(client, total_count_sql) or 0)
 
     return {
         "dimension": safe_dimension,
@@ -600,7 +670,56 @@ LIMIT {safe_limit}
         "end_date": end_day.isoformat(),
         "limit": safe_limit,
         "count": len(values),
+        "total_count": total_count,
+        "is_truncated": total_count > len(values),
+        "value_source": "observed_usage_rows",
         "values": values,
+    }
+
+
+def list_active_namespaces(
+    client,
+    *,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+    institution: str | Sequence[str] | None = None,
+    node: str | Sequence[str] | None = None,
+    node_regex: str | None = None,
+    node_institution: str | Sequence[str] | None = None,
+    resource: str | Sequence[str] | None = None,
+    prefix: str | None = None,
+    regex: str | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    result = _list_distinct_dimension_values(
+        client,
+        dimension="namespace",
+        granularity="namespace",
+        start_date=start_date,
+        end_date=end_date,
+        institution=institution,
+        node=node,
+        node_regex=node_regex,
+        node_institution=node_institution,
+        resource=resource,
+        prefix=prefix,
+        regex=regex,
+        limit=limit,
+        settings=settings,
+        default_days=DEFAULT_TREND_DAYS,
+        default_limit=DEFAULT_ACTIVE_NAMESPACE_LIMIT,
+    )
+
+    return {
+        "start_date": result["start_date"],
+        "end_date": result["end_date"],
+        "limit": result["limit"],
+        "count": result["count"],
+        "total_count": result["total_count"],
+        "is_truncated": result["is_truncated"],
+        "value_source": result["value_source"],
+        "namespaces": result["values"],
     }
 
 

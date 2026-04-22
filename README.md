@@ -242,7 +242,8 @@ This exposes OpenAPI docs at `http://localhost:8000/openapi/docs`.
 Available tools:
 
 - `get_latest_data_date`: most recent ingested accounting date
-- `list_filter_values`: discover namespaces, institutions, nodes, resources, and other filter values
+- `list_active_namespaces`: namespaces with observed usage in a date window, defaulting to the last 30 days
+- `list_filter_values`: discover distinct namespaces, institutions, nodes, resources, and other values observed in usage rows for the filtered date range
 - `top_resource_consumers`: top namespaces, institutions, or nodes for one resource
 - `get_usage_timeseries`: daily trend for one namespace, institution, node, or node-institution
 - `get_namespace_summary`: latest or date-bounded namespace summary by resource
@@ -267,6 +268,12 @@ Date behavior:
 - If `start_date` and `end_date` are both omitted, the tool queries the most recent ingested date.
 - If only one of them is supplied, the query is treated as a single-day lookup.
 - Trend-oriented tools default to the last 30 days when no dates are supplied.
+- `list_active_namespaces` also defaults to the last 30 days when no dates are supplied.
+
+Discovery behavior:
+
+- `list_filter_values` and `list_active_namespaces` return values observed in actual accounting usage rows, not a static catalog.
+- Discovery responses include `total_count` and `is_truncated` so callers can tell when a result set was cut off by `limit`.
 
 Example prompt/tool call intent:
 

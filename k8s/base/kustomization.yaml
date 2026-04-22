@@ -9,7 +9,9 @@ resources:
   - secret.yaml
   - cronjob-etl.yaml
   - deployment-mcp.yaml
+  - deployment-openapi.yaml
   - service-mcp.yaml
+  - service-openapi.yaml
   - ingress-mcp.yaml
 
 labels:

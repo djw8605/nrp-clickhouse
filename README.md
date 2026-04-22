@@ -135,7 +135,7 @@ export INSTITUTION_CSV_URL="https://raw.githubusercontent.com/djw8605/nrp-ror-la
 
 ## Kubernetes (Kustomize)
 
-ClickHouse is intentionally not deployed here. These manifests deploy the ETL/backfill pipeline plus an MCP query service.
+ClickHouse is intentionally not deployed here. These manifests deploy the ETL/backfill pipeline plus MCP and OpenAPI query services.
 
 Apply production overlay:
 
@@ -145,7 +145,7 @@ kubectl apply -k k8s/overlays/prod
 
 Files to customize before apply:
 
-- `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`
+- `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, and `MCPO_API_KEY`
 - `k8s/overlays/prod/kustomization.yaml`: set your pipeline image name/tag
 - `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, and runtime tuning values
 
@@ -153,7 +153,9 @@ Deployed components:
 
 - `CronJob/nrp-accounting-etl`: daily accounting ETL
 - `Deployment/nrp-accounting-mcp`: read-only MCP server over streamable HTTP
+- `Deployment/nrp-accounting-openapi`: OpenAPI bridge for Open WebUI and other OpenAPI clients
 - `Service/nrp-accounting-mcp`: cluster-internal service on port `8000`
+- `Service/nrp-accounting-openapi`: cluster-internal service on port `8000`
 - `Ingress/nrp-accounting-mcp`: external HAProxy ingress for `https://nrp-accounting-mcp.nrp-nautilus.io/`
 
 The provided ingress follows the NRP HAProxy pattern:
@@ -161,7 +163,8 @@ The provided ingress follows the NRP HAProxy pattern:
 - `ingressClassName: haproxy`
 - host `nrp-accounting-mcp.nrp-nautilus.io`
 - TLS enabled for that host
-- root path `/` routed to the MCP service
+- root path `/` routed to the native MCP service
+- path `/openapi` routed to the OpenAPI bridge service
 - FastMCP DNS rebinding protection configured to allow that public host
 
 If you want a different public subdomain, update the `host` value in [ingress-mcp.yaml](/Users/derekweitzel/git/nrp-clickhouse/k8s/base/ingress-mcp.yaml) or patch it in an overlay before applying.
@@ -213,7 +216,7 @@ Backfill runs dates sequentially and is safe to restart.
 
 ## MCP Server
 
-This repo also includes a read-only MCP server for querying accounting usage from ClickHouse.
+This repo also includes a read-only MCP server for querying accounting usage from ClickHouse, plus an OpenAPI-compatible bridge for Open WebUI-style tool servers.
 
 Run over stdio:
 
@@ -226,6 +229,15 @@ Run over streamable HTTP:
 ```bash
 python3 -m nrp_accounting_pipeline.mcp_server --transport streamable-http --host 0.0.0.0 --port 8000
 ```
+
+Run as an OpenAPI-compatible server with `mcpo`:
+
+```bash
+export MCPO_API_KEY="replace-me"
+mcpo --host 0.0.0.0 --port 8000 --root-path /openapi --api-key "$MCPO_API_KEY" -- python3 -m nrp_accounting_pipeline.mcp_server
+```
+
+This exposes OpenAPI docs at `http://localhost:8000/openapi/docs`.
 
 Available tools:
 
@@ -265,7 +277,11 @@ Example prompt/tool call intent:
 - "Who are the top 10 GPU-consuming institutions this week?"
 - "Show a 30-day GPU trend for namespace `foo`"
 
-When deployed with the included Kubernetes ingress, external MCP clients should connect to `https://nrp-accounting-mcp.nrp-nautilus.io/`.
+When deployed with the included Kubernetes ingress:
+
+- external MCP clients should connect to `https://nrp-accounting-mcp.nrp-nautilus.io/`
+- external OpenAPI clients should connect to `https://nrp-accounting-mcp.nrp-nautilus.io/openapi`
+- the generated OpenAPI docs are served at `https://nrp-accounting-mcp.nrp-nautilus.io/openapi/docs`
 
 ## Institution Mapping CSV Import
 

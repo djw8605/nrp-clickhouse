@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
 
 from nrp_accounting_pipeline.accounting_queries import (
     build_resource_usage_query,
+    get_latest_data_date,
+    get_namespace_details,
+    get_namespace_summary,
+    get_usage_timeseries,
+    list_filter_values,
     query_resource_usage,
+    top_resource_consumers,
 )
 from nrp_accounting_pipeline.config import Settings
 
@@ -29,6 +35,9 @@ TEST_SETTINGS = Settings(
     PORTAL_TIMEOUT_SECONDS=60.0,
     CLICKHOUSE_WRITE_BATCH_SIZE=5000,
     INSTITUTION_CSV_URL=None,
+    MCP_ENABLE_DNS_REBINDING_PROTECTION=True,
+    MCP_ALLOWED_HOSTS=["127.0.0.1:*", "localhost:*"],
+    MCP_ALLOWED_ORIGINS=["http://127.0.0.1:*", "http://localhost:*"],
 )
 
 
@@ -38,26 +47,29 @@ class FakeQueryResult:
     column_names: list[str] | None = None
 
 
-class FakeClient:
-    def __init__(self) -> None:
+class PatternClient:
+    def __init__(self, patterns: list[tuple[str, FakeQueryResult]]) -> None:
+        self.patterns = patterns
         self.queries: list[str] = []
 
     def query(self, sql: str) -> FakeQueryResult:
-        self.queries.append(sql)
-        if sql.startswith("SELECT max(date)"):
-            return FakeQueryResult(result_rows=[(date(2026, 4, 21),)], column_names=["max(date)"])
-
-        return FakeQueryResult(
-            result_rows=[
-                ("demo-ns", "Delta University", "gpu-node-a", "gpu", "gpu_hours", Decimal("12.500000")),
-                ("demo-ns", "Delta University", "gpu-node-b", "gpu", "gpu_hours", Decimal("4.250000")),
-            ],
-            column_names=["namespace", "institution", "node", "resource", "unit", "usage"],
-        )
+        normalized = " ".join(sql.split())
+        self.queries.append(normalized)
+        for pattern, result in self.patterns:
+            if pattern in normalized:
+                return result
+        raise AssertionError(f"Unexpected query: {normalized}")
 
 
 def test_build_resource_usage_query_applies_filters_and_latest_date_default() -> None:
-    client = FakeClient()
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+        ]
+    )
 
     spec = build_resource_usage_query(
         client,
@@ -77,11 +89,10 @@ def test_build_resource_usage_query_applies_filters_and_latest_date_default() ->
     assert "match(usage.node, '^gpu-node-')" in spec.sql
     assert "usage.resource IN ('gpu')" in spec.sql
     assert spec.group_by == ["namespace", "institution", "node", "resource", "unit"]
-    assert client.queries == ["SELECT max(date) FROM accounting.cluster_namespace_usage_daily"]
 
 
 def test_build_resource_usage_query_requires_resource_dimension_when_multiple_resources() -> None:
-    client = FakeClient()
+    client = PatternClient([])
 
     with pytest.raises(ValueError, match="group_by must include 'resource'"):
         build_resource_usage_query(
@@ -94,7 +105,34 @@ def test_build_resource_usage_query_requires_resource_dimension_when_multiple_re
 
 
 def test_query_resource_usage_serializes_rows() -> None:
-    client = FakeClient()
+    client = PatternClient(
+        [
+            (
+                "GROUP BY usage.namespace, coalesce(meta.institution, 'Unknown'), usage.node, usage.resource, usage.unit",
+                FakeQueryResult(
+                    [
+                        (
+                            "demo-ns",
+                            "Delta University",
+                            "gpu-node-a",
+                            "gpu",
+                            "gpu_hours",
+                            Decimal("12.500000"),
+                        ),
+                        (
+                            "demo-ns",
+                            "Delta University",
+                            "gpu-node-b",
+                            "gpu",
+                            "gpu_hours",
+                            Decimal("4.250000"),
+                        ),
+                    ],
+                    ["namespace", "institution", "node", "resource", "unit", "usage"],
+                ),
+            ),
+        ]
+    )
 
     result = query_resource_usage(
         client,
@@ -118,4 +156,235 @@ def test_query_resource_usage_serializes_rows() -> None:
         "unit": "gpu_hours",
         "usage": 12.5,
     }
-    assert len(client.queries) == 1
+
+
+def test_get_latest_data_date_returns_latest_day() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+        ]
+    )
+
+    result = get_latest_data_date(client, settings=TEST_SETTINGS)
+
+    assert result == {
+        "granularity": "namespace",
+        "latest_data_date": "2026-04-21",
+    }
+
+
+def test_list_filter_values_returns_distinct_dimension_values() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+            (
+                "SELECT DISTINCT coalesce(meta.institution, 'Unknown') AS value",
+                FakeQueryResult(
+                    [("Delta University",), ("Other University",)],
+                    ["value"],
+                ),
+            ),
+        ]
+    )
+
+    result = list_filter_values(
+        client,
+        dimension="institution",
+        prefix="D",
+        limit=20,
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["dimension"] == "institution"
+    assert result["start_date"] == "2026-04-21"
+    assert result["values"] == ["Delta University", "Other University"]
+    assert "LIKE 'D%'" in client.queries[-1]
+
+
+def test_top_resource_consumers_returns_ranked_rows() -> None:
+    client = PatternClient(
+        [
+            (
+                "GROUP BY coalesce(meta.institution, 'Unknown') ORDER BY usage DESC, institution LIMIT 5",
+                FakeQueryResult(
+                    [
+                        ("Delta University", "gpu_hours", Decimal("17.250000")),
+                        ("Other University", "gpu_hours", Decimal("7.000000")),
+                    ],
+                    ["institution", "unit", "usage"],
+                ),
+            ),
+        ]
+    )
+
+    result = top_resource_consumers(
+        client,
+        dimension="institution",
+        resource="gpu",
+        start_date="2026-04-20",
+        end_date="2026-04-21",
+        limit=5,
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["dimension"] == "institution"
+    assert result["resource"] == "gpu"
+    assert result["row_count"] == 2
+    assert result["rows"][0]["institution"] == "Delta University"
+    assert result["rows"][0]["usage"] == 17.25
+
+
+def test_get_usage_timeseries_defaults_to_last_30_days() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+            (
+                "GROUP BY usage.date ORDER BY date ASC LIMIT 366",
+                FakeQueryResult(
+                    [
+                        (date(2026, 4, 19), "gpu_hours", Decimal("5.000000")),
+                        (date(2026, 4, 20), "gpu_hours", Decimal("6.500000")),
+                    ],
+                    ["date", "unit", "usage"],
+                ),
+            ),
+        ]
+    )
+
+    result = get_usage_timeseries(
+        client,
+        dimension="institution",
+        value="Delta University",
+        resource="gpu",
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["start_date"] == "2026-03-23"
+    assert result["end_date"] == "2026-04-21"
+    assert result["rows"][0]["date"] == "2026-04-19"
+    assert "coalesce(meta.institution, 'Unknown') = 'Delta University'" in client.queries[-1]
+
+
+def test_get_namespace_summary_groups_by_resource() -> None:
+    client = PatternClient(
+        [
+            (
+                "GROUP BY usage.resource, usage.unit",
+                FakeQueryResult(
+                    [
+                        ("gpu", "gpu_hours", Decimal("12.500000")),
+                        ("cpu", "cpu_core_hours", Decimal("100.000000")),
+                    ],
+                    ["resource", "unit", "usage"],
+                ),
+            ),
+        ]
+    )
+
+    result = get_namespace_summary(
+        client,
+        namespace="demo-ns",
+        start_date="2026-04-21",
+        end_date="2026-04-21",
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["namespace"] == "demo-ns"
+    assert result["row_count"] == 2
+    assert result["rows"][0]["resource"] == "gpu"
+
+
+def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+            (
+                "FROM accounting.namespace_metadata_mapping WHERE namespace = 'demo-ns' LIMIT 1",
+                FakeQueryResult(
+                    [
+                        (
+                            "demo-ns",
+                            "Dr Example",
+                            "Delta University",
+                            "admin1,admin2",
+                            "Delta University",
+                            datetime(2026, 4, 21, 12, 0, 0),
+                        ),
+                    ],
+                    [
+                        "namespace",
+                        "pi",
+                        "institution",
+                        "admins",
+                        "user_institutions",
+                        "updated_at",
+                    ],
+                ),
+            ),
+            (
+                "WHERE usage.date >= toDate('2026-04-21') AND usage.date <= toDate('2026-04-21') AND usage.namespace IN ('demo-ns') GROUP BY usage.resource, usage.unit",
+                FakeQueryResult(
+                    [
+                        ("gpu", "gpu_hours", Decimal("12.500000")),
+                        ("cpu", "cpu_core_hours", Decimal("100.000000")),
+                    ],
+                    ["resource", "unit", "usage"],
+                ),
+            ),
+            (
+                "WHERE usage.date >= toDate('2026-03-23') AND usage.date <= toDate('2026-04-21') AND usage.namespace IN ('demo-ns') GROUP BY usage.date, usage.resource, usage.unit",
+                FakeQueryResult(
+                    [
+                        (date(2026, 4, 20), "gpu", "gpu_hours", Decimal("5.000000")),
+                        (date(2026, 4, 21), "gpu", "gpu_hours", Decimal("7.500000")),
+                    ],
+                    ["date", "resource", "unit", "usage"],
+                ),
+            ),
+            (
+                "usage.namespace IN ('demo-ns') AND usage.resource IN ('gpu')",
+                FakeQueryResult(
+                    [
+                        ("gpu-node-a", "gpu_hours", Decimal("8.000000")),
+                        ("gpu-node-b", "gpu_hours", Decimal("4.500000")),
+                    ],
+                    ["node", "unit", "usage"],
+                ),
+            ),
+            (
+                "usage.namespace IN ('demo-ns') AND usage.resource IN ('cpu')",
+                FakeQueryResult(
+                    [
+                        ("cpu-node-a", "cpu_core_hours", Decimal("60.000000")),
+                        ("cpu-node-b", "cpu_core_hours", Decimal("40.000000")),
+                    ],
+                    ["node", "unit", "usage"],
+                ),
+            ),
+        ]
+    )
+
+    result = get_namespace_details(
+        client,
+        namespace="demo-ns",
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["namespace"] == "demo-ns"
+    assert result["latest_data_date"] == "2026-04-21"
+    assert result["metadata"]["institution"] == "Delta University"
+    assert len(result["latest_summary"]) == 2
+    assert len(result["daily_trend"]) == 2
+    assert set(result["top_nodes_by_resource"]) == {"gpu", "cpu"}

@@ -227,9 +227,17 @@ Run over streamable HTTP:
 python3 -m nrp_accounting_pipeline.mcp_server --transport streamable-http --host 0.0.0.0 --port 8000
 ```
 
-Primary tool:
+Available tools:
 
-- `query_resource_usage`
+- `get_latest_data_date`: most recent ingested accounting date
+- `list_filter_values`: discover namespaces, institutions, nodes, resources, and other filter values
+- `top_resource_consumers`: top namespaces, institutions, or nodes for one resource
+- `get_usage_timeseries`: daily trend for one namespace, institution, node, or node-institution
+- `get_namespace_summary`: latest or date-bounded namespace summary by resource
+- `get_namespace_daily_trend`: namespace trend view, defaulting to the last 30 days
+- `top_nodes_for_namespace`: top nodes for one namespace and one resource
+- `get_namespace_details`: namespace metadata, latest summary, recent trend, and top nodes
+- `query_resource_usage`: flexible escape hatch for custom aggregations
 
 Supported filters:
 
@@ -246,12 +254,16 @@ Date behavior:
 
 - If `start_date` and `end_date` are both omitted, the tool queries the most recent ingested date.
 - If only one of them is supplied, the query is treated as a single-day lookup.
+- Trend-oriented tools default to the last 30 days when no dates are supplied.
 
 Example prompt/tool call intent:
 
 - "Show GPU usage for namespace `foo` on the latest ingested day"
 - "Sum memory usage for institution `Delta University` between `2026-04-01` and `2026-04-07`"
 - "Find usage on nodes matching `^gpu-node-` grouped by namespace and resource"
+- "What namespaces exist in the latest accounting data?"
+- "Who are the top 10 GPU-consuming institutions this week?"
+- "Show a 30-day GPU trend for namespace `foo`"
 
 When deployed with the included Kubernetes ingress, external MCP clients should connect to `https://nrp-accounting-mcp.nrp-nautilus.io/`.
 

@@ -170,7 +170,12 @@ def run_for_date(
         )
         aggregation_duration = round(time.monotonic() - aggregation_started, 3)
 
-        observed_namespaces = sorted({row.namespace for row in namespace_rows})
+        # Keep metadata sync aligned with both rolled-up namespace usage rows and
+        # the raw LLM token rows so namespaces with only LLM activity are always
+        # considered observed.
+        observed_namespaces = sorted(
+            {row.namespace for row in namespace_rows} | {row.namespace for row in llm_rows}
+        )
         portal_rows = namespace_metadata_seed_rows
         if portal_rows is None:
             portal_rows = fetch_namespace_metadata(settings=active_settings)

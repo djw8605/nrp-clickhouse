@@ -11,9 +11,13 @@ from nrp_accounting_pipeline.accounting_queries import (
     get_latest_data_date,
     list_active_namespaces,
     get_namespace_details,
+    get_namespace_llm_daily_trend,
+    get_namespace_llm_summary,
     get_namespace_summary,
     get_usage_timeseries,
     list_filter_values,
+    list_llm_filter_values,
+    query_llm_token_usage,
     query_resource_usage,
     top_resource_consumers,
 )
@@ -112,6 +116,26 @@ def test_build_resource_usage_query_normalizes_resource_aliases() -> None:
     assert "usage.resource IN ('gpu', 'cpu')" in spec.sql
 
 
+def test_build_resource_usage_query_normalizes_llm_resource_aliases() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+        ]
+    )
+
+    spec = build_resource_usage_query(
+        client,
+        resource=["llm_tokens", "tokens"],
+        group_by=["namespace", "resource", "unit"],
+        settings=TEST_SETTINGS,
+    )
+
+    assert "usage.resource IN ('llm')" in spec.sql
+
+
 def test_build_resource_usage_query_rejects_unknown_resource_values() -> None:
     client = PatternClient([])
 
@@ -193,6 +217,37 @@ def test_query_resource_usage_serializes_rows() -> None:
     }
 
 
+def test_query_llm_token_usage_serializes_rows() -> None:
+    client = PatternClient(
+        [
+            (
+                "FROM accounting.llm_token_usage_daily AS usage",
+                FakeQueryResult(
+                    [
+                        ("demo-ns", "qwen3", "input", Decimal("1200.000000")),
+                        ("demo-ns", "qwen3", "output", Decimal("300.000000")),
+                    ],
+                    ["namespace", "model", "token_type", "tokens_used"],
+                ),
+            ),
+        ]
+    )
+
+    result = query_llm_token_usage(
+        client,
+        start_date="2026-04-20",
+        end_date="2026-04-21",
+        namespace="demo-ns",
+        group_by=["namespace", "model", "token_type"],
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["metric"] == "tokens_used"
+    assert result["start_date"] == "2026-04-20"
+    assert result["row_count"] == 2
+    assert result["rows"][0]["tokens_used"] == 1200.0
+
+
 def test_get_latest_data_date_returns_latest_day() -> None:
     client = PatternClient(
         [
@@ -247,6 +302,41 @@ def test_list_filter_values_returns_distinct_dimension_values() -> None:
     assert result["is_truncated"] is False
     assert result["value_source"] == "observed_usage_rows"
     assert "LIKE 'D%'" in client.queries[-1]
+
+
+def test_list_llm_filter_values_returns_distinct_values() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT count() AS total_count FROM ( SELECT DISTINCT usage.model AS value",
+                FakeQueryResult([(2,)], ["total_count"]),
+            ),
+            (
+                "SELECT max(date) FROM accounting.llm_token_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+            (
+                "SELECT DISTINCT usage.model AS value",
+                FakeQueryResult(
+                    [("gemma",), ("qwen3",)],
+                    ["value"],
+                ),
+            ),
+        ]
+    )
+
+    result = list_llm_filter_values(
+        client,
+        dimension="model",
+        prefix="q",
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["dimension"] == "model"
+    assert result["start_date"] == "2026-04-21"
+    assert result["values"] == ["gemma", "qwen3"]
+    assert result["value_source"] == "observed_llm_usage_rows"
+    assert "LIKE 'q%'" in client.queries[-1]
 
 
 def test_list_active_namespaces_defaults_to_last_30_days_and_reports_truncation() -> None:
@@ -404,6 +494,67 @@ def test_get_namespace_summary_groups_by_resource() -> None:
     assert result["rows"][0]["resource"] == "gpu"
 
 
+def test_get_namespace_llm_summary_groups_by_token_dimensions() -> None:
+    client = PatternClient(
+        [
+            (
+                "GROUP BY usage.token_alias, usage.model, usage.token_type",
+                FakeQueryResult(
+                    [
+                        ("lab-assistant", "qwen3", "input", Decimal("1200.000000")),
+                        ("lab-assistant", "qwen3", "output", Decimal("300.000000")),
+                    ],
+                    ["token_alias", "model", "token_type", "tokens_used"],
+                ),
+            ),
+        ]
+    )
+
+    result = get_namespace_llm_summary(
+        client,
+        namespace="demo-ns",
+        start_date="2026-04-21",
+        end_date="2026-04-21",
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["namespace"] == "demo-ns"
+    assert result["row_count"] == 2
+    assert result["rows"][0]["token_alias"] == "lab-assistant"
+
+
+def test_get_namespace_llm_daily_trend_defaults_to_last_30_days() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.llm_token_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+            (
+                "GROUP BY usage.date ORDER BY date DESC LIMIT 366",
+                FakeQueryResult(
+                    [
+                        (date(2026, 4, 20), Decimal("1200.000000")),
+                        (date(2026, 4, 21), Decimal("1500.000000")),
+                    ],
+                    ["date", "tokens_used"],
+                ),
+            ),
+        ]
+    )
+
+    result = get_namespace_llm_daily_trend(
+        client,
+        namespace="demo-ns",
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["start_date"] == "2026-03-23"
+    assert result["end_date"] == "2026-04-21"
+    assert result["rows"][0]["date"] == "2026-04-20"
+    assert result["rows"][1]["tokens_used"] == 1500.0
+
+
 def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
     client = PatternClient(
         [
@@ -440,6 +591,7 @@ def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
                     [
                         ("gpu", "gpu_hours", Decimal("12.500000")),
                         ("cpu", "cpu_core_hours", Decimal("100.000000")),
+                        ("llm", "tokens", Decimal("1500.000000")),
                     ],
                     ["resource", "unit", "usage"],
                 ),
@@ -486,6 +638,6 @@ def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
     assert result["namespace"] == "demo-ns"
     assert result["latest_data_date"] == "2026-04-21"
     assert result["metadata"]["institution"] == "Delta University"
-    assert len(result["latest_summary"]) == 2
+    assert len(result["latest_summary"]) == 3
     assert len(result["daily_trend"]) == 2
     assert set(result["top_nodes_by_resource"]) == {"gpu", "cpu"}

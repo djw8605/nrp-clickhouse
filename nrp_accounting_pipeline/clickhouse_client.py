@@ -7,12 +7,14 @@ from typing import Callable, Iterable, Sequence
 
 from .config import Settings, get_settings
 from .models import (
+    LlmTokenUsageRecord,
     NamespaceMetadataRecord,
     NamespaceUsageRecord,
     NodeInstitutionRecord,
     PodUsageRecord,
 )
 from .schema import (
+    LLM_TOKEN_TABLE_NAME,
     NAMESPACE_METADATA_TABLE_NAME,
     NAMESPACE_TABLE_NAME,
     NODE_INSTITUTION_TABLE_NAME,
@@ -142,6 +144,7 @@ def delete_existing_partitions(client, target_date: date, settings: Settings | N
     active_settings = settings or get_settings()
     _delete_for_date(client, POD_TABLE_NAME, target_date, active_settings)
     _delete_for_date(client, NAMESPACE_TABLE_NAME, target_date, active_settings)
+    _delete_for_date(client, LLM_TOKEN_TABLE_NAME, target_date, active_settings)
 
 
 def insert_pod_usage(
@@ -223,6 +226,46 @@ def insert_namespace_usage(
         inserted += len(batch)
 
     logger.info("clickhouse_insert_namespace_complete", extra={"row_count": inserted})
+    return inserted
+
+
+def insert_llm_token_usage(
+    client,
+    rows: Sequence[LlmTokenUsageRecord],
+    settings: Settings | None = None,
+) -> int:
+    if not rows:
+        logger.info("clickhouse_insert_llm_token_skipped_no_rows")
+        return 0
+
+    active_settings = settings or get_settings()
+    batch_size = max(1, active_settings.CLICKHOUSE_WRITE_BATCH_SIZE)
+    table_name = table_qualified_name(active_settings.CLICKHOUSE_DATABASE, LLM_TOKEN_TABLE_NAME)
+
+    inserted = 0
+    for batch in _chunk_rows(rows, batch_size):
+        payload = [row.to_clickhouse_tuple() for row in batch]
+
+        def _insert_batch() -> None:
+            client.insert(
+                table_name,
+                payload,
+                column_names=[
+                    "date",
+                    "namespace",
+                    "token_alias",
+                    "model",
+                    "token_type",
+                    "tokens_used",
+                ],
+            )
+
+        _retry_with_backoff(
+            "insert_llm_token_usage_batch", active_settings.RETRY_LIMIT, _insert_batch
+        )
+        inserted += len(batch)
+
+    logger.info("clickhouse_insert_llm_token_complete", extra={"row_count": inserted})
     return inserted
 
 

@@ -9,6 +9,7 @@ from typing import Any, Sequence
 from .aggregation import normalize_resource as normalize_metric_resource
 from .config import Settings, get_settings
 from .schema import (
+    LLM_TOKEN_TABLE_NAME,
     NAMESPACE_METADATA_TABLE_NAME,
     NAMESPACE_TABLE_NAME,
     NODE_INSTITUTION_TABLE_NAME,
@@ -28,6 +29,7 @@ _CANONICAL_RESOURCE_VALUES = (
     "cpu",
     "gpu",
     "fpga",
+    "llm",
     "memory",
     "storage",
     "network",
@@ -46,6 +48,9 @@ _RESOURCE_INPUT_ALIASES = {
     "fpga": "fpga",
     "fpga_hour": "fpga",
     "fpga_hours": "fpga",
+    "llm": "llm",
+    "llm_token": "llm",
+    "llm_tokens": "llm",
     "memory": "memory",
     "memory_gb": "memory",
     "memory_gb_hour": "memory",
@@ -68,6 +73,8 @@ _RESOURCE_INPUT_ALIASES = {
     "network_receive": "network",
     "network_transmit": "network",
     "other": "other",
+    "token": "llm",
+    "tokens": "llm",
 }
 
 _RESOURCE_ALIAS_EXAMPLES = (
@@ -75,6 +82,7 @@ _RESOURCE_ALIAS_EXAMPLES = (
     "gpu-hours -> gpu",
     "GPU hours -> gpu",
     "cpu_core_hours -> cpu",
+    "tokens -> llm",
 )
 
 DEFAULT_GROUP_BY: dict[str, list[str]] = {
@@ -123,6 +131,21 @@ _TIMESERIES_DIMENSIONS = {
     "node_institution": _GROUPABLE_EXPRESSIONS["node_institution"],
 }
 
+_LLM_GROUPABLE_EXPRESSIONS: dict[str, str] = {
+    "date": "usage.date",
+    "namespace": "usage.namespace",
+    "token_alias": "usage.token_alias",
+    "model": "usage.model",
+    "token_type": "usage.token_type",
+}
+
+_LLM_LISTABLE_DIMENSIONS = {
+    "namespace": _LLM_GROUPABLE_EXPRESSIONS["namespace"],
+    "token_alias": _LLM_GROUPABLE_EXPRESSIONS["token_alias"],
+    "model": _LLM_GROUPABLE_EXPRESSIONS["model"],
+    "token_type": _LLM_GROUPABLE_EXPRESSIONS["token_type"],
+}
+
 _NAMESPACE_METADATA_COLUMNS = [
     "namespace",
     "pi",
@@ -137,6 +160,15 @@ _NAMESPACE_METADATA_COLUMNS = [
 class AccountingQuerySpec:
     sql: str
     granularity: str
+    start_date: date
+    end_date: date
+    group_by: list[str]
+    limit: int
+
+
+@dataclass(frozen=True)
+class LlmTokenQuerySpec:
+    sql: str
     start_date: date
     end_date: date
     group_by: list[str]
@@ -261,6 +293,27 @@ def _latest_ingested_date(
     return _coerce_date(latest_value)  # type: ignore[return-value]
 
 
+def _latest_date_for_table(
+    client,
+    *,
+    table_name: str,
+) -> date:
+    result = client.query(f"SELECT max(date) FROM {table_name}")
+    latest_value = result.result_rows[0][0] if result.result_rows else None
+    if latest_value is None:
+        raise RuntimeError("No accounting data is available in ClickHouse yet.")
+    return _coerce_date(latest_value)  # type: ignore[return-value]
+
+
+def _latest_llm_ingested_date(
+    client,
+    *,
+    settings: Settings,
+) -> date:
+    table_name = table_qualified_name(settings.CLICKHOUSE_DATABASE, LLM_TOKEN_TABLE_NAME)
+    return _latest_date_for_table(client, table_name=table_name)
+
+
 def _resolve_date_window(
     client,
     *,
@@ -324,6 +377,58 @@ def _resolve_date_window_with_default_days(
     )
 
 
+def _resolve_llm_date_window(
+    client,
+    *,
+    settings: Settings,
+    start_date: date | datetime | str | None,
+    end_date: date | datetime | str | None,
+) -> tuple[date, date]:
+    parsed_start = _coerce_date(start_date)
+    parsed_end = _coerce_date(end_date)
+
+    if parsed_start is None and parsed_end is None:
+        latest_date = _latest_llm_ingested_date(client, settings=settings)
+        return latest_date, latest_date
+
+    if parsed_start is None:
+        parsed_start = parsed_end
+    if parsed_end is None:
+        parsed_end = parsed_start
+
+    assert parsed_start is not None
+    assert parsed_end is not None
+
+    if parsed_start > parsed_end:
+        raise ValueError("start_date must be on or before end_date")
+
+    return parsed_start, parsed_end
+
+
+def _resolve_llm_date_window_with_default_days(
+    client,
+    *,
+    settings: Settings,
+    start_date: date | datetime | str | None,
+    end_date: date | datetime | str | None,
+    default_days: int,
+) -> tuple[date, date]:
+    parsed_start = _coerce_date(start_date)
+    parsed_end = _coerce_date(end_date)
+
+    if parsed_start is None and parsed_end is None:
+        latest_date = _latest_llm_ingested_date(client, settings=settings)
+        span_days = max(default_days - 1, 0)
+        return latest_date - timedelta(days=span_days), latest_date
+
+    return _resolve_llm_date_window(
+        client,
+        settings=settings,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
 def _validate_group_by(granularity: str, group_by: Sequence[str] | None) -> list[str]:
     requested = list(group_by) if group_by else DEFAULT_GROUP_BY[granularity]
     validated: list[str] = []
@@ -358,6 +463,30 @@ def _validate_dimension(
     if granularity != "pod" and name == "pod_name":
         raise ValueError("pod_name can only be used when granularity='pod'")
     return name
+
+
+def _validate_llm_group_by(group_by: Sequence[str] | None) -> list[str]:
+    requested = (
+        list(group_by)
+        if group_by
+        else ["date", "namespace", "token_alias", "model", "token_type"]
+    )
+    validated: list[str] = []
+    seen: set[str] = set()
+
+    for column in requested:
+        if column not in _LLM_GROUPABLE_EXPRESSIONS:
+            allowed = ", ".join(sorted(_LLM_GROUPABLE_EXPRESSIONS))
+            raise ValueError(f"Unsupported group_by field {column!r}. Allowed values: {allowed}")
+        if column in seen:
+            continue
+        validated.append(column)
+        seen.add(column)
+
+    if not validated:
+        raise ValueError("group_by must contain at least one dimension")
+
+    return validated
 
 
 def _validate_limit(limit: int | None, *, default: int = DEFAULT_RESULT_LIMIT) -> int:
@@ -433,6 +562,13 @@ def _resolve_usage_tables(
     return usage_table, metadata_table, node_institution_table
 
 
+def _resolve_llm_usage_table(
+    *,
+    settings: Settings,
+) -> str:
+    return table_qualified_name(settings.CLICKHOUSE_DATABASE, LLM_TOKEN_TABLE_NAME)
+
+
 def _build_usage_where_clauses(
     *,
     start_day: date,
@@ -469,6 +605,28 @@ def _build_usage_where_clauses(
     if node_regex:
         clauses.append(f"match(usage.node, {_sql_string_literal(node_regex)})")
 
+    clauses.extend(extra_clauses)
+    return clauses
+
+
+def _build_llm_where_clauses(
+    *,
+    start_day: date,
+    end_day: date,
+    namespace_filters: Sequence[str] = (),
+    token_alias_filters: Sequence[str] = (),
+    model_filters: Sequence[str] = (),
+    token_type_filters: Sequence[str] = (),
+    extra_clauses: Sequence[str] = (),
+) -> list[str]:
+    clauses = [
+        f"usage.date >= toDate('{start_day.isoformat()}')",
+        f"usage.date <= toDate('{end_day.isoformat()}')",
+    ]
+    _maybe_add_in_filter(clauses, expression="usage.namespace", values=namespace_filters)
+    _maybe_add_in_filter(clauses, expression="usage.token_alias", values=token_alias_filters)
+    _maybe_add_in_filter(clauses, expression="usage.model", values=model_filters)
+    _maybe_add_in_filter(clauses, expression="usage.token_type", values=token_type_filters)
     clauses.extend(extra_clauses)
     return clauses
 
@@ -629,6 +787,108 @@ def query_resource_usage(
     }
 
 
+def build_llm_token_usage_query(
+    client,
+    *,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+    namespace: str | Sequence[str] | None = None,
+    token_alias: str | Sequence[str] | None = None,
+    model: str | Sequence[str] | None = None,
+    token_type: str | Sequence[str] | None = None,
+    group_by: Sequence[str] | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+) -> LlmTokenQuerySpec:
+    active_settings = settings or get_settings()
+    start_day, end_day = _resolve_llm_date_window(
+        client,
+        settings=active_settings,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    normalized_group_by = _validate_llm_group_by(group_by)
+    safe_limit = _validate_limit(limit)
+
+    where_clauses = _build_llm_where_clauses(
+        start_day=start_day,
+        end_day=end_day,
+        namespace_filters=_normalize_string_list(namespace),
+        token_alias_filters=_normalize_string_list(token_alias),
+        model_filters=_normalize_string_list(model),
+        token_type_filters=_normalize_string_list(token_type),
+    )
+    usage_table = _resolve_llm_usage_table(settings=active_settings)
+    select_expressions = [
+        f"{_LLM_GROUPABLE_EXPRESSIONS[column]} AS {column}" for column in normalized_group_by
+    ]
+    group_expressions = [_LLM_GROUPABLE_EXPRESSIONS[column] for column in normalized_group_by]
+
+    order_by_parts: list[str] = []
+    if "date" in normalized_group_by:
+        order_by_parts.append("date DESC")
+    order_by_parts.extend(column for column in normalized_group_by if column != "date")
+    if "date" not in normalized_group_by:
+        order_by_parts.append("tokens_used DESC")
+
+    sql = f"""
+SELECT
+  {", ".join(select_expressions)},
+  sum(usage.tokens_used) AS tokens_used
+FROM {usage_table} AS usage
+WHERE {" AND ".join(where_clauses)}
+GROUP BY {", ".join(group_expressions)}
+ORDER BY {", ".join(order_by_parts)}
+LIMIT {safe_limit}
+""".strip()
+
+    return LlmTokenQuerySpec(
+        sql=sql,
+        start_date=start_day,
+        end_date=end_day,
+        group_by=normalized_group_by,
+        limit=safe_limit,
+    )
+
+
+def query_llm_token_usage(
+    client,
+    *,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+    namespace: str | Sequence[str] | None = None,
+    token_alias: str | Sequence[str] | None = None,
+    model: str | Sequence[str] | None = None,
+    token_type: str | Sequence[str] | None = None,
+    group_by: Sequence[str] | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    spec = build_llm_token_usage_query(
+        client,
+        start_date=start_date,
+        end_date=end_date,
+        namespace=namespace,
+        token_alias=token_alias,
+        model=model,
+        token_type=token_type,
+        group_by=group_by,
+        limit=limit,
+        settings=settings,
+    )
+    rows = _query_rows(client, spec.sql, spec.group_by + ["tokens_used"])
+
+    return {
+        "metric": "tokens_used",
+        "start_date": spec.start_date.isoformat(),
+        "end_date": spec.end_date.isoformat(),
+        "group_by": spec.group_by,
+        "limit": spec.limit,
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
 def get_latest_data_date(
     client,
     *,
@@ -683,6 +943,90 @@ def list_filter_values(
         limit=limit,
         settings=settings,
     )
+
+
+def list_llm_filter_values(
+    client,
+    *,
+    dimension: str,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+    namespace: str | Sequence[str] | None = None,
+    token_alias: str | Sequence[str] | None = None,
+    model: str | Sequence[str] | None = None,
+    token_type: str | Sequence[str] | None = None,
+    prefix: str | None = None,
+    regex: str | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    safe_dimension = _validate_dimension(dimension, _LLM_LISTABLE_DIMENSIONS, granularity="pod")
+    safe_limit = _validate_limit(limit, default=DEFAULT_DISCOVERY_LIMIT)
+    active_settings = settings or get_settings()
+    start_day, end_day = _resolve_llm_date_window(
+        client,
+        settings=active_settings,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    if regex:
+        re.compile(regex)
+
+    usage_table = _resolve_llm_usage_table(settings=active_settings)
+    dimension_expression = _LLM_LISTABLE_DIMENSIONS[safe_dimension]
+    extra_clauses = [f"notEmpty(toString({dimension_expression}))"]
+    if prefix:
+        extra_clauses.append(f"{dimension_expression} LIKE {_sql_string_literal(prefix + '%')}")
+    if regex:
+        extra_clauses.append(f"match({dimension_expression}, {_sql_string_literal(regex)})")
+
+    where_clauses = _build_llm_where_clauses(
+        start_day=start_day,
+        end_day=end_day,
+        namespace_filters=_normalize_string_list(namespace),
+        token_alias_filters=_normalize_string_list(token_alias),
+        model_filters=_normalize_string_list(model),
+        token_type_filters=_normalize_string_list(token_type),
+        extra_clauses=extra_clauses,
+    )
+
+    from_and_where_sql = f"""
+FROM {usage_table} AS usage
+WHERE {" AND ".join(where_clauses)}
+""".strip()
+
+    sql = f"""
+SELECT DISTINCT
+  {dimension_expression} AS value
+{from_and_where_sql}
+ORDER BY value
+LIMIT {safe_limit}
+""".strip()
+    rows = _query_rows(client, sql, ["value"])
+    values = [row["value"] for row in rows]
+
+    total_count_sql = f"""
+SELECT count() AS total_count
+FROM (
+  SELECT DISTINCT
+    {dimension_expression} AS value
+  {from_and_where_sql}
+)
+""".strip()
+    total_count = int(_query_scalar(client, total_count_sql) or 0)
+
+    return {
+        "dimension": safe_dimension,
+        "start_date": start_day.isoformat(),
+        "end_date": end_day.isoformat(),
+        "limit": safe_limit,
+        "count": len(values),
+        "total_count": total_count,
+        "is_truncated": total_count > len(values),
+        "value_source": "observed_llm_usage_rows",
+        "values": values,
+    }
 
 
 def _list_distinct_dimension_values(
@@ -1068,6 +1412,82 @@ def get_namespace_daily_trend(
     }
 
 
+def get_namespace_llm_summary(
+    client,
+    *,
+    namespace: str,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+    token_alias: str | Sequence[str] | None = None,
+    model: str | Sequence[str] | None = None,
+    token_type: str | Sequence[str] | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    result = query_llm_token_usage(
+        client,
+        start_date=start_date,
+        end_date=end_date,
+        namespace=namespace,
+        token_alias=token_alias,
+        model=model,
+        token_type=token_type,
+        group_by=["token_alias", "model", "token_type"],
+        limit=DEFAULT_RESULT_LIMIT,
+        settings=settings,
+    )
+    return {
+        "namespace": namespace,
+        "start_date": result["start_date"],
+        "end_date": result["end_date"],
+        "row_count": result["row_count"],
+        "rows": result["rows"],
+    }
+
+
+def get_namespace_llm_daily_trend(
+    client,
+    *,
+    namespace: str,
+    token_alias: str | Sequence[str] | None = None,
+    model: str | Sequence[str] | None = None,
+    token_type: str | Sequence[str] | None = None,
+    start_date: date | datetime | str | None = None,
+    end_date: date | datetime | str | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    active_settings = settings or get_settings()
+    start_day, end_day = _resolve_llm_date_window_with_default_days(
+        client,
+        settings=active_settings,
+        start_date=start_date,
+        end_date=end_date,
+        default_days=DEFAULT_TREND_DAYS,
+    )
+    result = query_llm_token_usage(
+        client,
+        start_date=start_day,
+        end_date=end_day,
+        namespace=namespace,
+        token_alias=token_alias,
+        model=model,
+        token_type=token_type,
+        group_by=["date"],
+        limit=366,
+        settings=active_settings,
+    )
+    rows = sorted(result["rows"], key=lambda row: row["date"])
+    return {
+        "namespace": namespace,
+        "token_alias": _normalize_string_list(token_alias),
+        "model": _normalize_string_list(model),
+        "token_type": _normalize_string_list(token_type),
+        "start_date": start_day.isoformat(),
+        "end_date": end_day.isoformat(),
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
 def top_nodes_for_namespace(
     client,
     *,
@@ -1170,7 +1590,7 @@ def get_namespace_details(
             {
                 str(row["resource"])
                 for row in latest_summary["rows"]
-                if row.get("resource")
+                if row.get("resource") and str(row["resource"]) != "llm"
             }
         )
 

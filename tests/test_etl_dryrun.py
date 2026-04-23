@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nrp_accounting_pipeline.aggregation import (
     aggregate_daily_metrics,
+    aggregate_llm_token_usage,
     aggregate_namespace_usage,
     normalize_resource,
 )
@@ -71,8 +72,17 @@ def _fetch_allocated_resources() -> dict[str, Any]:
     return _instant_query(f"sum_over_time(namespace_allocated_resources[1d:5m]@{_END_TS})")
 
 
+def _fetch_llm_token_usage() -> dict[str, Any]:
+    """Run the production LLM ETL query against real Prometheus."""
+    return _instant_query(
+        "sum(increase(gen_ai_client_token_usage_sum[1d]@"
+        f"{_END_TS})) by (team_id, token_alias, gen_ai_original_model, gen_ai_token_type)"
+    )
+
+
 # Cache the live payload so we only hit Prometheus once per test session.
 _live_payload: dict[str, Any] | None = None
+_live_llm_payload: dict[str, Any] | None = None
 
 
 def _get_live_payload() -> dict[str, Any]:
@@ -80,6 +90,13 @@ def _get_live_payload() -> dict[str, Any]:
     if _live_payload is None:
         _live_payload = _fetch_allocated_resources()
     return _live_payload
+
+
+def _get_live_llm_payload() -> dict[str, Any]:
+    global _live_llm_payload
+    if _live_llm_payload is None:
+        _live_llm_payload = _fetch_llm_token_usage()
+    return _live_llm_payload
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +161,31 @@ def test_etl_query_returns_data():
 
 
 @pytest.mark.timeout(90)
+def test_llm_etl_query_returns_data():
+    """The production LLM ETL query returns at least one time series."""
+    payload = _get_live_llm_payload()
+    series = payload["data"]["result"]
+    assert len(series) > 0, "LLM ETL query returned no series"
+    print(f"\n  [OK] LLM ETL query returned {len(series)} series")
+
+
+@pytest.mark.timeout(90)
+def test_llm_etl_query_has_expected_labels():
+    """The LLM ETL query preserves namespace, token, model, and token type labels."""
+    payload = _get_live_llm_payload()
+    series = payload["data"]["result"]
+    first = series[0]["metric"]
+    for required_label in (
+        "team_id",
+        "token_alias",
+        "gen_ai_original_model",
+        "gen_ai_token_type",
+    ):
+        assert first.get(required_label), f"Missing expected label {required_label!r}: {first}"
+    print(f"\n  [OK] LLM ETL labels present on sample series: {first}")
+
+
+@pytest.mark.timeout(90)
 @pytest.mark.xfail(
     reason="annotation_nrp_ai_username is new; sum_over_time only preserves labels "
            "present across the full subquery window. Will pass once propagated.",
@@ -186,6 +228,13 @@ def aggregated():
     pod_rows = aggregate_daily_metrics(results, target_date=TARGET_DATE)
     namespace_rows = aggregate_namespace_usage(pod_rows)
     return pod_rows, namespace_rows
+
+
+@pytest.fixture(scope="module")
+def aggregated_llm():
+    """Run the LLM aggregation pipeline once; share the result across tests."""
+    payload = _get_live_llm_payload()
+    return aggregate_llm_token_usage(payload, target_date=TARGET_DATE)
 
 
 @pytest.mark.timeout(120)
@@ -299,6 +348,24 @@ def test_aggregation_namespaces_non_empty(aggregated):
     assert len(empty_ns) == 0, f"{len(empty_ns)} rows have an empty namespace"
     namespaces = {r.namespace for r in pod_rows}
     print(f"\n  [OK] {len(namespaces)} distinct namespaces in aggregated rows")
+
+
+@pytest.mark.timeout(120)
+def test_llm_aggregation_produces_rows(aggregated_llm):
+    """LLM aggregation produces at least one LlmTokenUsageRecord."""
+    assert len(aggregated_llm) > 0, "aggregate_llm_token_usage returned no rows"
+    print(f"\n  [OK] {len(aggregated_llm)} LlmTokenUsageRecords produced")
+
+
+@pytest.mark.timeout(120)
+def test_llm_aggregation_preserves_common_token_types(aggregated_llm):
+    """LLM aggregation preserves the common input and output token types."""
+    token_types = {row.token_type for row in aggregated_llm}
+    for expected in ("input", "output"):
+        assert expected in token_types, (
+            f"Expected token type {expected!r} not found. Present: {sorted(token_types)}"
+        )
+    print(f"\n  [OK] LLM token types include: {sorted(token_types)}")
 
 
 # ---------------------------------------------------------------------------

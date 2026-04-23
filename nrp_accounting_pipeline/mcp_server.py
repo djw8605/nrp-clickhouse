@@ -11,9 +11,13 @@ from .accounting_queries import (
     list_active_namespaces as run_list_active_namespaces,
     get_namespace_daily_trend as run_get_namespace_daily_trend,
     get_namespace_details as run_get_namespace_details,
+    get_namespace_llm_daily_trend as run_get_namespace_llm_daily_trend,
+    get_namespace_llm_summary as run_get_namespace_llm_summary,
     get_namespace_summary as run_get_namespace_summary,
     get_usage_timeseries as run_get_usage_timeseries,
     list_filter_values as run_list_filter_values,
+    list_llm_filter_values as run_list_llm_filter_values,
+    query_llm_token_usage as run_query_llm_token_usage,
     query_resource_usage as run_resource_usage_query,
     top_nodes_for_namespace as run_top_nodes_for_namespace,
     top_resource_consumers as run_top_resource_consumers,
@@ -72,10 +76,12 @@ mcp = _FastMCP(
     instructions=(
         "Read-only access to NRP accounting usage data stored in ClickHouse. "
         "Use the focused tools for common accounting questions like latest data date, "
-        "active namespaces, top consumers, filter discovery, timeseries, and namespace details. "
-        "Resource arguments use canonical names like gpu, cpu, memory, storage, fpga, and network. "
+        "active namespaces, top consumers, filter discovery, timeseries, namespace details, and "
+        "LLM token usage breakdowns. Resource arguments use canonical names like gpu, cpu, memory, "
+        "storage, fpga, network, and llm. "
         "Common aliases like gpu_hours, gpu-hours, GPU hours, and cpu_core_hours are normalized automatically. "
-        "Use query_resource_usage for custom aggregations."
+        "Use query_resource_usage for custom infrastructure aggregations and query_llm_token_usage "
+        "for custom LLM token aggregations."
     ),
     lifespan=app_lifespan,
     stateless_http=True,
@@ -105,10 +111,10 @@ def query_resource_usage(
     If start_date and end_date are both omitted, the tool uses the most recent ingested date.
     If only one of start_date or end_date is provided, it is treated as a single-day query.
 
-    Resource inputs should use canonical names like gpu or cpu. For example, use resource='gpu' for
-    GPU-hours queries, not resource='gpu_hours'. Common aliases such as gpu_hours, gpu-hours, GPU
-    hours, and cpu_core_hours are accepted and normalized automatically. The unit is returned
-    separately in the unit field, for example resource='gpu' yields unit='gpu_hours'.
+    Resource inputs should use canonical names like gpu, cpu, or llm. For example, use
+    resource='gpu' for GPU-hours queries and resource='llm' for namespace-level token totals.
+    Common aliases such as gpu_hours, gpu-hours, GPU hours, cpu_core_hours, and llm_tokens are
+    accepted and normalized automatically. The unit is returned separately in the unit field.
 
     Supported group_by values:
     - date
@@ -198,6 +204,66 @@ def list_filter_values(
 
 
 @mcp.tool()
+def query_llm_token_usage(
+    ctx: Context[ServerSession, AppContext],
+    start_date: str | None = None,
+    end_date: str | None = None,
+    namespace: str | list[str] | None = None,
+    token_alias: str | list[str] | None = None,
+    model: str | list[str] | None = None,
+    token_type: str | list[str] | None = None,
+    group_by: list[str] | None = None,
+    limit: int = 500,
+) -> dict[str, object]:
+    """Query daily LLM token usage by namespace, token alias, model, and token type."""
+    app_context = ctx.request_context.lifespan_context
+    return run_query_llm_token_usage(
+        app_context.client,
+        start_date=start_date,
+        end_date=end_date,
+        namespace=namespace,
+        token_alias=token_alias,
+        model=model,
+        token_type=token_type,
+        group_by=group_by,
+        limit=limit,
+        settings=app_context.settings,
+    )
+
+
+@mcp.tool()
+def list_llm_filter_values(
+    ctx: Context[ServerSession, AppContext],
+    dimension: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    namespace: str | list[str] | None = None,
+    token_alias: str | list[str] | None = None,
+    model: str | list[str] | None = None,
+    token_type: str | list[str] | None = None,
+    prefix: str | None = None,
+    regex: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    """List observed namespaces, token aliases, models, or token types from daily LLM usage rows."""
+    app_context = ctx.request_context.lifespan_context
+    return run_list_llm_filter_values(
+        app_context.client,
+        dimension=dimension,
+        start_date=start_date,
+        end_date=end_date,
+        namespace=namespace,
+        token_alias=token_alias,
+        model=model,
+        token_type=token_type,
+        prefix=prefix,
+        regex=regex,
+        limit=limit,
+        settings=app_context.settings,
+    )
+
+
+@mcp.tool()
 def list_active_namespaces(
     ctx: Context[ServerSession, AppContext],
     start_date: str | None = None,
@@ -251,9 +317,9 @@ def top_resource_consumers(
 ) -> dict[str, object]:
     """Rank the top namespaces, institutions, or nodes for a specific resource.
 
-    Use canonical resource names like gpu or cpu. For example, use resource='gpu' for GPU-hours
-    ranking, not resource='gpu_hours'. Common aliases such as gpu_hours, gpu-hours, GPU hours, and
-    cpu_core_hours are accepted and normalized automatically.
+    Use canonical resource names like gpu, cpu, or llm. For example, use resource='llm' for
+    namespace token rankings. Common aliases such as gpu_hours, gpu-hours, GPU hours,
+    cpu_core_hours, and llm_tokens are accepted and normalized automatically.
     """
     app_context = ctx.request_context.lifespan_context
     return run_top_resource_consumers(
@@ -286,8 +352,8 @@ def get_usage_timeseries(
 ) -> dict[str, object]:
     """Get a daily usage trend for one namespace, institution, node, or node-institution value.
 
-    Resource inputs use canonical names like gpu or cpu. For example, use resource='gpu' for GPU
-    trends, not resource='gpu_hours'. Common aliases such as gpu_hours and cpu_core_hours are
+    Resource inputs use canonical names like gpu, cpu, or llm. For example, use resource='llm' for
+    namespace token trends. Common aliases such as gpu_hours, cpu_core_hours, and llm_tokens are
     accepted and normalized automatically.
     """
     app_context = ctx.request_context.lifespan_context
@@ -314,9 +380,8 @@ def get_namespace_summary(
 ) -> dict[str, object]:
     """Get a namespace summary grouped by resource and unit.
 
-    If resource is provided, use a canonical resource name like gpu or cpu. For example, use
-    resource='gpu' for GPU-hours summaries, not resource='gpu_hours'. Common aliases such as
-    gpu_hours and cpu_core_hours are accepted and normalized automatically.
+    If resource is provided, use a canonical resource name like gpu, cpu, or llm. Common aliases
+    such as gpu_hours, cpu_core_hours, and llm_tokens are accepted and normalized automatically.
     """
     app_context = ctx.request_context.lifespan_context
     return run_get_namespace_summary(
@@ -325,6 +390,30 @@ def get_namespace_summary(
         start_date=start_date,
         end_date=end_date,
         resource=resource,
+        settings=app_context.settings,
+    )
+
+
+@mcp.tool()
+def get_namespace_llm_summary(
+    ctx: Context[ServerSession, AppContext],
+    namespace: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    token_alias: str | list[str] | None = None,
+    model: str | list[str] | None = None,
+    token_type: str | list[str] | None = None,
+) -> dict[str, object]:
+    """Get a namespace's LLM token summary grouped by token alias, model, and token type."""
+    app_context = ctx.request_context.lifespan_context
+    return run_get_namespace_llm_summary(
+        app_context.client,
+        namespace=namespace,
+        start_date=start_date,
+        end_date=end_date,
+        token_alias=token_alias,
+        model=model,
+        token_type=token_type,
         settings=app_context.settings,
     )
 
@@ -339,15 +428,38 @@ def get_namespace_daily_trend(
 ) -> dict[str, object]:
     """Get a namespace's daily trend, defaulting to the last 30 days when no dates are supplied.
 
-    If resource is provided, use a canonical resource name like gpu or cpu. For example, use
-    resource='gpu' for GPU-hours trends, not resource='gpu_hours'. Common aliases such as
-    gpu_hours and cpu_core_hours are accepted and normalized automatically.
+    If resource is provided, use a canonical resource name like gpu, cpu, or llm. Common aliases
+    such as gpu_hours, cpu_core_hours, and llm_tokens are accepted and normalized automatically.
     """
     app_context = ctx.request_context.lifespan_context
     return run_get_namespace_daily_trend(
         app_context.client,
         namespace=namespace,
         resource=resource,
+        start_date=start_date,
+        end_date=end_date,
+        settings=app_context.settings,
+    )
+
+
+@mcp.tool()
+def get_namespace_llm_daily_trend(
+    ctx: Context[ServerSession, AppContext],
+    namespace: str,
+    token_alias: str | list[str] | None = None,
+    model: str | list[str] | None = None,
+    token_type: str | list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, object]:
+    """Get a namespace's daily LLM token trend, optionally filtered by token alias, model, or token type."""
+    app_context = ctx.request_context.lifespan_context
+    return run_get_namespace_llm_daily_trend(
+        app_context.client,
+        namespace=namespace,
+        token_alias=token_alias,
+        model=model,
+        token_type=token_type,
         start_date=start_date,
         end_date=end_date,
         settings=app_context.settings,
@@ -365,9 +477,8 @@ def top_nodes_for_namespace(
 ) -> dict[str, object]:
     """Rank the highest-usage nodes for one namespace and one resource.
 
-    Use canonical resource names like gpu or cpu. For example, use resource='gpu' for GPU-hours
-    node ranking, not resource='gpu_hours'. Common aliases such as gpu_hours, gpu-hours, GPU hours,
-    and cpu_core_hours are accepted and normalized automatically.
+    Use canonical resource names like gpu, cpu, or llm. Common aliases such as gpu_hours,
+    gpu-hours, GPU hours, cpu_core_hours, and llm_tokens are accepted and normalized automatically.
     """
     app_context = ctx.request_context.lifespan_context
     return run_top_nodes_for_namespace(

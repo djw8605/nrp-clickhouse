@@ -4,13 +4,15 @@ Production-grade Python ETL pipeline to pull Kubernetes usage metrics from Prome
 
 ## High-Cardinality Design
 
-The pipeline writes two usage tables:
+The pipeline writes three usage tables:
 
 1. `cluster_pod_usage_daily` (high cardinality)
 2. `cluster_namespace_usage_daily` (low cardinality, accounting totals)
+3. `llm_token_usage_daily` (daily LLM token detail)
 
 `cluster_pod_usage_daily` stores both `pod_name` and `pod_hash` (`CityHash64`) so large pod-cardinality workloads remain query-efficient while retaining a debug-friendly raw pod identifier.
-Both tables include a `node` dimension so namespace-level summaries can be broken down by the node where jobs ran.
+The Kubernetes infrastructure usage tables include a `node` dimension so namespace-level summaries can be broken down by the node where jobs ran.
+`llm_token_usage_daily` stores token-level daily totals from the Envoy AI gateway Prometheus metric and also feeds synthetic namespace-level `llm` rows into `cluster_namespace_usage_daily`.
 The ETL also maintains a namespace dimension table populated from `portal.nrp.ai`.
 
 ## Table Architecture
@@ -36,7 +38,7 @@ Columns:
 
 ### `cluster_namespace_usage_daily` (low cardinality summary)
 
-- Purpose: namespace-level accounting summary (rolled up from pod rows)
+- Purpose: namespace-level accounting summary (rolled up from pod rows plus synthetic namespace-level LLM token totals)
 - Engine: `SummingMergeTree`
 - Partition: `toYYYYMM(date)`
 - Order key: `(date, namespace, node, resource)`
@@ -50,6 +52,22 @@ Columns:
 - `resource LowCardinality(String)`
 - `usage Decimal64(6)`
 - `unit LowCardinality(String)`
+
+### `llm_token_usage_daily` (LLM token detail)
+
+- Purpose: namespace/token/model/token-type daily LLM accounting rows from the AI gateway
+- Engine: `MergeTree`
+- Partition: `toYYYYMM(date)`
+- Order key: `(date, namespace, token_alias, model, token_type)`
+
+Columns:
+
+- `date Date`
+- `namespace LowCardinality(String)`
+- `token_alias LowCardinality(String)`
+- `model LowCardinality(String)`
+- `token_type LowCardinality(String)`
+- `tokens_used Decimal64(6)`
 
 ### `node_institution_mapping` (dimension table)
 
@@ -82,10 +100,13 @@ Columns:
 
 - Source metric: `namespace_allocated_resources`
 - Daily query method: `sum_over_time(namespace_allocated_resources[1d:5m]@end_ts)`
+- LLM source metric: `gen_ai_client_token_usage_sum`
+- LLM daily query method: `sum(increase(gen_ai_client_token_usage_sum[1d]@end_ts)) by (team_id, token_alias, gen_ai_original_model, gen_ai_token_type)`
 - Resource normalization:
   - `amd_com_xilinx* -> fpga`
   - `cpu -> cpu`
   - `nvidia_com* -> gpu`
+  - `llm -> llm`
   - `memory -> memory`
   - `ephemeral_storage -> storage`
   - everything else -> `other`
@@ -93,6 +114,7 @@ Columns:
   - `cpu -> cpu_core_hours`
   - `gpu -> gpu_hours`
   - `fpga -> fpga_hours`
+  - `llm -> tokens`
   - `memory -> memory_gb_hours`
   - `storage -> storage_gb_hours`
   - `network -> network_gb`
@@ -102,10 +124,12 @@ Row placement:
 
 - `cluster_pod_usage_daily`: one row per `(date, namespace, created_by, node, pod_name, resource, unit)` with `pod_hash` derived from `pod_name`.
 - `cluster_namespace_usage_daily`: sum of pod usage grouped by `(date, namespace, created_by, node, resource, unit)`.
+- `llm_token_usage_daily`: one row per `(date, namespace, token_alias, model, token_type)` with `tokens_used` from the AI gateway Prometheus counter increase.
+- `cluster_namespace_usage_daily` also receives one synthetic LLM row per `(date, namespace)` with `resource='llm'`, `unit='tokens'`, `created_by='llm-gateway'`, and `node='llm-gateway'`.
 
 Idempotency behavior:
 
-- For each processing date, ETL deletes existing rows for that date from both tables, then inserts fresh aggregates.
+- For each processing date, ETL deletes existing rows for that date from all usage tables, then inserts fresh aggregates.
 
 ## Install
 
@@ -213,6 +237,7 @@ python backfill.py --start 2025-01-01 --end 2025-02-01
 ```
 
 Backfill runs dates sequentially and is safe to restart.
+If you are enabling LLM accounting on a ClickHouse database that already has historical namespace usage rows, rerun historical dates with `--force` so `llm_token_usage_daily` and namespace-level `llm` totals are populated for those days.
 
 ## MCP Server
 
@@ -244,13 +269,17 @@ Available tools:
 - `get_latest_data_date`: most recent ingested accounting date
 - `list_active_namespaces`: namespaces with observed usage in a date window, defaulting to the last 30 days
 - `list_filter_values`: discover distinct namespaces, institutions, nodes, resources, and other values observed in usage rows for the filtered date range
+- `list_llm_filter_values`: discover distinct namespaces, token aliases, models, and token types observed in daily LLM rows
 - `top_resource_consumers`: top namespaces, institutions, or nodes for one resource
 - `get_usage_timeseries`: daily trend for one namespace, institution, node, or node-institution
 - `get_namespace_summary`: latest or date-bounded namespace summary by resource
 - `get_namespace_daily_trend`: namespace trend view, defaulting to the last 30 days
+- `get_namespace_llm_summary`: latest or date-bounded namespace LLM summary by token alias, model, and token type
+- `get_namespace_llm_daily_trend`: namespace LLM token trend, defaulting to the last 30 days
 - `top_nodes_for_namespace`: top nodes for one namespace and one resource
 - `get_namespace_details`: namespace metadata, latest summary, recent trend, and top nodes
 - `query_resource_usage`: flexible escape hatch for custom aggregations
+- `query_llm_token_usage`: flexible escape hatch for token/model/type LLM aggregations
 
 Supported filters:
 
@@ -259,12 +288,14 @@ Supported filters:
 - `node`: one node name or a list of node names
 - `node_regex`: ClickHouse regex matched against `node`
 - `node_institution`: institution from `node_institution_mapping`
-- `resource`: normalized resource name such as `cpu`, `gpu`, `memory`, `storage`, `fpga`, `network`
-- Resource aliases like `gpu_hours`, `gpu-hours`, `GPU hours`, and `cpu_core_hours` are accepted and normalized automatically
-- For example, use `resource=gpu` for GPU-hours queries and `resource=cpu` for CPU core-hour queries; units come back separately
+- `resource`: normalized resource name such as `cpu`, `gpu`, `memory`, `storage`, `fpga`, `network`, or `llm`
+- Resource aliases like `gpu_hours`, `gpu-hours`, `GPU hours`, `cpu_core_hours`, `llm_tokens`, and `tokens` are accepted and normalized automatically
+- For example, use `resource=gpu` for GPU-hours queries, `resource=cpu` for CPU core-hour queries, and `resource=llm` for namespace-level LLM token totals; units come back separately
 - Units are returned separately in the `unit` field, for example `resource=gpu` yields `unit=gpu_hours`
 - `granularity`: `namespace` or `pod`
 - `group_by`: any of `date`, `namespace`, `institution`, `pi`, `node`, `node_institution`, `created_by`, `resource`, `unit`, and `pod_name` (pod granularity only)
+- LLM-specific filters: `token_alias`, `model`, and `token_type`
+- LLM-specific `group_by`: any of `date`, `namespace`, `token_alias`, `model`, and `token_type`
 
 Date behavior:
 
@@ -277,6 +308,7 @@ Date behavior:
 Discovery behavior:
 
 - `list_filter_values` and `list_active_namespaces` return values observed in actual accounting usage rows, not a static catalog.
+- `list_llm_filter_values` returns values observed in actual daily LLM usage rows, not a static catalog.
 - Discovery responses include `total_count` and `is_truncated` so callers can tell when a result set was cut off by `limit`.
 
 Example prompt/tool call intent:
@@ -287,6 +319,9 @@ Example prompt/tool call intent:
 - "What namespaces exist in the latest accounting data?"
 - "Who are the top 10 GPU-consuming institutions this week?"
 - "Show a 30-day GPU trend for namespace `foo`"
+- "Show namespace `foo` LLM token totals for the latest day"
+- "Break down namespace `foo` LLM usage by token alias and model this week"
+- "Show a 30-day LLM token trend for namespace `foo`"
 
 When deployed with the included Kubernetes ingress:
 

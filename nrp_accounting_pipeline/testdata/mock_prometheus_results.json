@@ -139,5 +139,49 @@
         }
       ]
     }
+  },
+  "gen_ai_client_token_usage_sum": {
+    "status": "success",
+    "data": {
+      "resultType": "vector",
+      "result": [
+        {
+          "metric": {
+            "team_id": "analytics",
+            "token_alias": "lab-assistant",
+            "gen_ai_original_model": "qwen3",
+            "gen_ai_token_type": "input"
+          },
+          "value": [1700007200, "1200"]
+        },
+        {
+          "metric": {
+            "team_id": "analytics",
+            "token_alias": "lab-assistant",
+            "gen_ai_original_model": "qwen3",
+            "gen_ai_token_type": "output"
+          },
+          "value": [1700007200, "300"]
+        },
+        {
+          "metric": {
+            "team_id": "analytics",
+            "token_alias": "lab-assistant",
+            "gen_ai_original_model": "qwen3",
+            "gen_ai_token_type": "cached_input"
+          },
+          "value": [1700007200, "100"]
+        },
+        {
+          "metric": {
+            "team_id": "analytics",
+            "token_alias": "shared-token",
+            "gen_ai_original_model": "gemma",
+            "gen_ai_token_type": "cache_creation_input"
+          },
+          "value": [1700007200, "50"]
+        }
+      ]
+    }
   }
 }

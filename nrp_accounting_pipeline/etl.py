@@ -8,7 +8,12 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .aggregation import aggregate_daily_metrics, aggregate_namespace_usage
+from .aggregation import (
+    aggregate_daily_metrics,
+    aggregate_llm_namespace_usage,
+    aggregate_llm_token_usage,
+    aggregate_namespace_usage,
+)
 from .config import Settings, get_settings
 from .institution_import import download_and_import_institutions
 from .logging_config import configure_logging
@@ -21,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 ALLOCATED_RESOURCES_QUERY_TEMPLATE = (
     "sum_over_time(namespace_allocated_resources[1d:5m]@{end_ts})"
+)
+LLM_TOKEN_USAGE_QUERY_TEMPLATE = (
+    "sum(increase(gen_ai_client_token_usage_sum[1d]@{end_ts})) "
+    "by (team_id, token_alias, gen_ai_original_model, gen_ai_token_type)"
 )
 
 
@@ -54,6 +63,21 @@ def _query_allocated_resources(
     return {"namespace_allocated_resources": payload}
 
 
+def _query_llm_token_usage(
+    *,
+    end_ts: datetime,
+    settings: Settings,
+) -> dict[str, dict[str, Any]]:
+    query = LLM_TOKEN_USAGE_QUERY_TEMPLATE.format(end_ts=int(end_ts.timestamp()))
+    payload = query_prometheus(
+        query,
+        settings=settings,
+        timeout_seconds=settings.PROMETHEUS_TIMEOUT_SECONDS,
+        retry_limit=settings.RETRY_LIMIT,
+    )
+    return {"gen_ai_client_token_usage_sum": payload}
+
+
 
 def _default_mock_file() -> Path:
     return Path(__file__).resolve().parent / "testdata" / "mock_prometheus_results.json"
@@ -65,6 +89,14 @@ def _load_mock_prometheus_results(path: Path | None = None) -> dict[str, dict[st
     if not isinstance(data, dict):
         raise ValueError(f"Mock data file must contain an object: {mock_path}")
     return data
+
+
+def _pod_metric_payloads(results: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        metric_name: payload
+        for metric_name, payload in results.items()
+        if metric_name != "gen_ai_client_token_usage_sum"
+    }
 
 
 def run_for_date(
@@ -82,6 +114,7 @@ def run_for_date(
         create_tables_if_not_exist,
         delete_existing_partitions,
         has_data_for_date,
+        insert_llm_token_usage,
         sync_namespace_metadata,
         insert_namespace_usage,
         insert_pod_usage,
@@ -101,9 +134,18 @@ def run_for_date(
         _, end_ts = _day_bounds_utc(target_date)
 
         query_started = time.monotonic()
-        results = _query_allocated_resources(
-            end_ts=end_ts,
-            settings=active_settings,
+        results: dict[str, dict[str, Any]] = {}
+        results.update(
+            _query_allocated_resources(
+                end_ts=end_ts,
+                settings=active_settings,
+            )
+        )
+        results.update(
+            _query_llm_token_usage(
+                end_ts=end_ts,
+                settings=active_settings,
+            )
         )
         failed_queries: dict[str, str] = {}
         query_duration = round(time.monotonic() - query_started, 3)
@@ -115,8 +157,17 @@ def run_for_date(
             )
 
         aggregation_started = time.monotonic()
-        pod_rows = aggregate_daily_metrics(results, target_date=target_date)
+        pod_rows = aggregate_daily_metrics(_pod_metric_payloads(results), target_date=target_date)
         namespace_rows = aggregate_namespace_usage(pod_rows)
+        llm_rows = aggregate_llm_token_usage(
+            results.get("gen_ai_client_token_usage_sum", {}),
+            target_date=target_date,
+        )
+        llm_namespace_rows = aggregate_llm_namespace_usage(llm_rows)
+        namespace_rows = sorted(
+            namespace_rows + llm_namespace_rows,
+            key=lambda row: (row.date, row.namespace, row.node, row.resource, row.created_by),
+        )
         aggregation_duration = round(time.monotonic() - aggregation_started, 3)
 
         observed_namespaces = sorted({row.namespace for row in namespace_rows})
@@ -148,6 +199,7 @@ def run_for_date(
                 "date": target_date.isoformat(),
                 "inserted_pod_rows": 0,
                 "inserted_namespace_rows": 0,
+                "inserted_llm_rows": 0,
                 "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
                 "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
                 "institution_rows": institution_rows,
@@ -159,6 +211,7 @@ def run_for_date(
         inserted_namespace_rows = insert_namespace_usage(
             clickhouse_client, namespace_rows, active_settings
         )
+        inserted_llm_rows = insert_llm_token_usage(clickhouse_client, llm_rows, active_settings)
 
         institution_rows = download_and_import_institutions(settings=active_settings)
 
@@ -168,6 +221,7 @@ def run_for_date(
                 "date": target_date.isoformat(),
                 "inserted_pod_rows": inserted_pod_rows,
                 "inserted_namespace_rows": inserted_namespace_rows,
+                "inserted_llm_rows": inserted_llm_rows,
                 "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
                 "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
                 "institution_rows": institution_rows,
@@ -182,6 +236,7 @@ def run_for_date(
             "date": target_date.isoformat(),
             "inserted_pod_rows": inserted_pod_rows,
             "inserted_namespace_rows": inserted_namespace_rows,
+            "inserted_llm_rows": inserted_llm_rows,
             "namespace_metadata_inserted_rows": namespace_metadata_result["inserted"],
             "namespace_metadata_updated_rows": namespace_metadata_result["updated"],
             "institution_rows": institution_rows,
@@ -197,10 +252,19 @@ def run_test_mode(mock_file: str | None = None) -> int:
     started = time.monotonic()
 
     payloads = _load_mock_prometheus_results(Path(mock_file) if mock_file else None)
-    pod_rows = aggregate_daily_metrics(payloads, target_date=target_date)
+    pod_rows = aggregate_daily_metrics(_pod_metric_payloads(payloads), target_date=target_date)
     namespace_rows = aggregate_namespace_usage(pod_rows)
+    llm_rows = aggregate_llm_token_usage(
+        payloads.get("gen_ai_client_token_usage_sum", {}),
+        target_date=target_date,
+    )
+    namespace_rows = sorted(
+        namespace_rows + aggregate_llm_namespace_usage(llm_rows),
+        key=lambda row: (row.date, row.namespace, row.node, row.resource, row.created_by),
+    )
 
     result = {
+        "llm_rows": [row.to_dict() for row in llm_rows],
         "pod_rows": [row.to_dict() for row in pod_rows],
         "namespace_rows": [row.to_dict() for row in namespace_rows],
     }
@@ -210,6 +274,7 @@ def run_test_mode(mock_file: str | None = None) -> int:
         "etl_test_mode_complete",
         extra={
             "date": target_date.isoformat(),
+            "llm_row_count": len(llm_rows),
             "pod_row_count": len(pod_rows),
             "namespace_row_count": len(namespace_rows),
             "duration_seconds": round(time.monotonic() - started, 3),

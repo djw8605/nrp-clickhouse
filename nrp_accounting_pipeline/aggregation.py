@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import date
 from typing import Any, Iterable, Mapping
 
-from .models import NamespaceUsageRecord, PodUsageRecord, quantize_usage
+from .models import LlmTokenUsageRecord, NamespaceUsageRecord, PodUsageRecord, quantize_usage
 
 
 logger = logging.getLogger(__name__)
@@ -27,10 +27,16 @@ _RESOURCE_TO_UNIT = {
     "cpu": "cpu_core_hours",
     "gpu": "gpu_hours",
     "fpga": "fpga_hours",
+    "llm": "tokens",
     "memory": "memory_gb_hours",
     "storage": "storage_gb_hours",
     "network": "network_gb",
 }
+
+LLM_RESOURCE = "llm"
+LLM_CREATED_BY = "llm-gateway"
+LLM_NODE = "llm-gateway"
+UNKNOWN_LABEL_VALUE = "unknown"
 
 try:
     import cityhash  # type: ignore
@@ -41,6 +47,9 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in environments with
 
 def normalize_resource(resource_name: str) -> str:
     value = (resource_name or "").lower()
+
+    if value in {"llm", "llm_tokens"}:
+        return LLM_RESOURCE
 
     # Primary mapping for namespace_allocated_resources (matches historical JS logic).
     if "amd_com_xilinx" in value:
@@ -73,6 +82,13 @@ def resource_unit(resource_name: str) -> str:
         return _RESOURCE_TO_UNIT[resource_name]
     normalized = normalize_resource(resource_name)
     return _RESOURCE_TO_UNIT.get(normalized, "other")
+
+
+def _normalize_label_value(value: Any) -> str:
+    if value is None:
+        return UNKNOWN_LABEL_VALUE
+    normalized = str(value).strip()
+    return normalized or UNKNOWN_LABEL_VALUE
 
 
 def _extract_node_label(labels: Mapping[str, Any]) -> str:
@@ -307,3 +323,78 @@ def aggregate_namespace_usage(pod_rows: Iterable[PodUsageRecord]) -> list[Namesp
         key=lambda row: (row.date, row.namespace, row.node, row.resource, row.created_by)
     )
     return namespace_rows
+
+
+def aggregate_llm_token_usage(
+    payload: Mapping[str, Any],
+    *,
+    target_date: date,
+) -> list[LlmTokenUsageRecord]:
+    aggregated: dict[tuple[str, str, str, str], float] = defaultdict(float)
+    data = payload.get("data", {})
+    series_list = data.get("result", [])
+
+    for series in series_list:
+        labels = series.get("metric", {}) or {}
+        namespace = _normalize_label_value(labels.get("team_id"))
+        token_alias = _normalize_label_value(labels.get("token_alias"))
+        model = _normalize_label_value(labels.get("gen_ai_original_model"))
+        token_type = _normalize_label_value(labels.get("gen_ai_token_type"))
+        points = _extract_sample_points(series)
+
+        if not points:
+            logger.debug(
+                "aggregation_skip_empty_llm_series",
+                extra={"labels": labels},
+            )
+            continue
+
+        aggregated[(namespace, token_alias, model, token_type)] += sum(value for _, value in points)
+
+    rows = [
+        LlmTokenUsageRecord(
+            date=target_date,
+            namespace=namespace,
+            token_alias=token_alias,
+            model=model,
+            token_type=token_type,
+            tokens_used=quantize_usage(tokens_used),
+        )
+        for (namespace, token_alias, model, token_type), tokens_used in aggregated.items()
+    ]
+    rows.sort(
+        key=lambda row: (
+            row.date,
+            row.namespace,
+            row.token_alias,
+            row.model,
+            row.token_type,
+        )
+    )
+    return rows
+
+
+def aggregate_llm_namespace_usage(
+    llm_rows: Iterable[LlmTokenUsageRecord],
+) -> list[NamespaceUsageRecord]:
+    namespace_totals: dict[tuple[date, str], float] = defaultdict(float)
+
+    for row in llm_rows:
+        namespace_totals[(row.date, row.namespace)] += float(row.tokens_used)
+
+    rows = [
+        NamespaceUsageRecord(
+            date=target_date,
+            namespace=namespace,
+            created_by=LLM_CREATED_BY,
+            node=LLM_NODE,
+            resource=LLM_RESOURCE,
+            usage=quantize_usage(tokens_used),
+            unit=resource_unit(LLM_RESOURCE),
+        )
+        for (target_date, namespace), tokens_used in namespace_totals.items()
+    ]
+    rows.sort(
+        key=lambda row: (row.date, row.namespace, row.node, row.resource, row.created_by)
+    )
+    return rows

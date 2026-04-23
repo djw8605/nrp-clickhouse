@@ -86,6 +86,36 @@ class NamespaceUsageRecord:
 
 
 @dataclass(frozen=True)
+class LlmTokenUsageRecord:
+    date: date
+    namespace: str
+    token_alias: str
+    model: str
+    token_type: str
+    tokens_used: Decimal
+
+    def to_clickhouse_tuple(self) -> tuple[object, ...]:
+        return (
+            self.date,
+            self.namespace,
+            self.token_alias,
+            self.model,
+            self.token_type,
+            self.tokens_used,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "date": self.date.isoformat(),
+            "namespace": self.namespace,
+            "token_alias": self.token_alias,
+            "model": self.model,
+            "token_type": self.token_type,
+            "tokens_used": float(self.tokens_used),
+        }
+
+
+@dataclass(frozen=True)
 class NodeInstitutionRecord:
     node: str
     institution_name: str

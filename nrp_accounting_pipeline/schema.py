@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 POD_TABLE_NAME = "cluster_pod_usage_daily"
 NAMESPACE_TABLE_NAME = "cluster_namespace_usage_daily"
+LLM_TOKEN_TABLE_NAME = "llm_token_usage_daily"
 NODE_INSTITUTION_TABLE_NAME = "node_institution_mapping"
 NAMESPACE_METADATA_TABLE_NAME = "namespace_metadata_mapping"
 
@@ -33,6 +34,15 @@ NAMESPACE_EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("resource", "LowCardinality(String)"),
     ("usage", "Decimal64(6)"),
     ("unit", "LowCardinality(String)"),
+]
+
+LLM_TOKEN_EXPECTED_COLUMNS: list[tuple[str, str]] = [
+    ("date", "Date"),
+    ("namespace", "LowCardinality(String)"),
+    ("token_alias", "LowCardinality(String)"),
+    ("model", "LowCardinality(String)"),
+    ("token_type", "LowCardinality(String)"),
+    ("tokens_used", "Decimal64(6)"),
 ]
 
 NODE_INSTITUTION_EXPECTED_COLUMNS: list[tuple[str, str]] = [
@@ -101,6 +111,23 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NAMESPACE_TABLE_NAME)
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(date)
 ORDER BY (date, namespace, node, resource)
+""".strip()
+
+
+def create_llm_token_table_sql(database: str) -> str:
+    return f"""
+CREATE TABLE IF NOT EXISTS {table_qualified_name(database, LLM_TOKEN_TABLE_NAME)}
+(
+    date Date,
+    namespace LowCardinality(String),
+    token_alias LowCardinality(String),
+    model LowCardinality(String),
+    token_type LowCardinality(String),
+    tokens_used Decimal64(6)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(date)
+ORDER BY (date, namespace, token_alias, model, token_type)
 """.strip()
 
 
@@ -189,11 +216,13 @@ def ensure_schema(client, database: str) -> None:
     client.command(create_database_sql(database))
     client.command(create_pod_table_sql(database))
     client.command(create_namespace_table_sql(database))
+    client.command(create_llm_token_table_sql(database))
     client.command(create_node_institution_table_sql(database))
     client.command(create_namespace_metadata_table_sql(database))
 
     _apply_table_migrations(client, database, POD_TABLE_NAME, POD_EXPECTED_COLUMNS)
     _apply_table_migrations(client, database, NAMESPACE_TABLE_NAME, NAMESPACE_EXPECTED_COLUMNS)
+    _apply_table_migrations(client, database, LLM_TOKEN_TABLE_NAME, LLM_TOKEN_EXPECTED_COLUMNS)
     _apply_table_migrations(
         client,
         database,

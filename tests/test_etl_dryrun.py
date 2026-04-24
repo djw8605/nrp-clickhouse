@@ -29,6 +29,12 @@ from nrp_accounting_pipeline.aggregation import (
     aggregate_namespace_usage,
     normalize_resource,
 )
+from nrp_accounting_pipeline.etl import (
+    POD_ANNOTATIONS_QUERY_TEMPLATE,
+    POD_RESOURCE_METRIC_NAME,
+    POD_RESOURCE_REQUESTS_QUERY_TEMPLATE,
+    attach_pod_annotations_to_resource_payload,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -69,7 +75,11 @@ def _instant_query(query: str) -> dict[str, Any]:
 
 def _fetch_allocated_resources() -> dict[str, Any]:
     """Run the production ETL query against real Prometheus."""
-    return _instant_query(f"sum_over_time(namespace_allocated_resources[1d:5m]@{_END_TS})")
+    resource_payload = _instant_query(
+        POD_RESOURCE_REQUESTS_QUERY_TEMPLATE.format(end_ts=_END_TS)
+    )
+    annotations_payload = _instant_query(POD_ANNOTATIONS_QUERY_TEMPLATE.format(end_ts=_END_TS))
+    return attach_pod_annotations_to_resource_payload(resource_payload, annotations_payload)
 
 
 def _fetch_llm_token_usage() -> dict[str, Any]:
@@ -119,22 +129,22 @@ def test_prometheus_reachable():
 
 
 @pytest.mark.timeout(90)
-def test_namespace_allocated_resources_has_data():
-    """namespace_allocated_resources returns at least one time series."""
-    payload = _instant_query("namespace_allocated_resources")
+def test_pod_resource_requests_has_data():
+    """kube_pod_container_resource_requests returns at least one time series."""
+    payload = _instant_query("kube_pod_container_resource_requests")
     series = payload["data"]["result"]
-    assert len(series) > 0, "No series returned for namespace_allocated_resources"
-    print(f"\n  [OK] namespace_allocated_resources: {len(series)} series found")
+    assert len(series) > 0, "No series returned for kube_pod_container_resource_requests"
+    print(f"\n  [OK] kube_pod_container_resource_requests: {len(series)} series found")
 
 
 @pytest.mark.timeout(90)
 def test_annotation_nrp_ai_username_label_exists_in_prometheus():
     """
-    count by (annotation_nrp_ai_username) (namespace_allocated_resources)
+    count by (annotation_nrp_ai_username) (kube_pod_annotations)
     must return at least one non-empty username value.
     """
     payload = _instant_query(
-        "count by (annotation_nrp_ai_username) (namespace_allocated_resources)"
+        "count by (annotation_nrp_ai_username) (kube_pod_annotations)"
     )
     series = payload["data"]["result"]
     assert len(series) > 0, "No series returned — annotation label may be missing entirely"
@@ -186,16 +196,10 @@ def test_llm_etl_query_has_expected_labels():
 
 
 @pytest.mark.timeout(90)
-@pytest.mark.xfail(
-    reason="annotation_nrp_ai_username is new; sum_over_time only preserves labels "
-           "present across the full subquery window. Will pass once propagated.",
-    strict=False,
-)
 def test_annotation_label_present_in_etl_query():
     """
     At least one series returned by the ETL query carries
-    annotation_nrp_ai_username.  Will fail until the label has been present
-    on pods for a full day so sum_over_time preserves it.
+    annotation_nrp_ai_username from the pod annotation enrichment query.
     """
     payload = _get_live_payload()
     series = payload["data"]["result"]
@@ -224,7 +228,7 @@ def test_annotation_label_present_in_etl_query():
 def aggregated():
     """Run the full aggregation pipeline once; share the result across tests."""
     payload = _get_live_payload()
-    results = {"namespace_allocated_resources": payload}
+    results = {POD_RESOURCE_METRIC_NAME: payload}
     pod_rows = aggregate_daily_metrics(results, target_date=TARGET_DATE)
     namespace_rows = aggregate_namespace_usage(pod_rows)
     return pod_rows, namespace_rows
@@ -254,15 +258,9 @@ def test_aggregation_produces_namespace_rows(aggregated):
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.xfail(
-    reason="annotation_nrp_ai_username is new; sum_over_time only preserves labels "
-           "present across the full subquery window. Will pass once propagated.",
-    strict=False,
-)
 def test_aggregation_created_by_populated_from_annotation(aggregated):
     """
     At least one row must have created_by set to a non-'unknown' value.
-    Will fail until annotation_nrp_ai_username has been present for a full day.
     """
     pod_rows, _ = aggregated
     non_unknown = [r for r in pod_rows if r.created_by != "unknown"]
@@ -278,19 +276,14 @@ def test_aggregation_created_by_populated_from_annotation(aggregated):
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.xfail(
-    reason="annotation_nrp_ai_username is new; sum_over_time only preserves labels "
-           "present across the full subquery window. Will pass once propagated.",
-    strict=False,
-)
 def test_aggregation_annotation_username_used_as_created_by(aggregated):
     """
     Usernames from annotation_nrp_ai_username appear verbatim in
-    PodUsageRecord.created_by.  Will fail until the label has propagated.
+    PodUsageRecord.created_by.
     """
     # Collect expected usernames from the current instant query (not ETL subquery).
     payload = _instant_query(
-        "count by (annotation_nrp_ai_username) (namespace_allocated_resources)"
+        "count by (annotation_nrp_ai_username) (kube_pod_annotations)"
     )
     expected_usernames = {
         s["metric"]["annotation_nrp_ai_username"]

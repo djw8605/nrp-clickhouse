@@ -24,8 +24,12 @@ from .prometheus_client import query_prometheus
 logger = logging.getLogger(__name__)
 
 
-ALLOCATED_RESOURCES_QUERY_TEMPLATE = (
-    "sum_over_time(namespace_allocated_resources[1d:5m]@{end_ts})"
+POD_RESOURCE_METRIC_NAME = "kube_pod_container_resource_requests"
+POD_RESOURCE_REQUESTS_QUERY_TEMPLATE = (
+    "sum_over_time(kube_pod_container_resource_requests[1d:5m]@{end_ts})"
+)
+POD_ANNOTATIONS_QUERY_TEMPLATE = (
+    "max_over_time(kube_pod_annotations[1d:5m]@{end_ts})"
 )
 LLM_TOKEN_USAGE_QUERY_TEMPLATE = (
     "sum(increase(gen_ai_client_token_usage_sum[1d]@{end_ts})) "
@@ -48,19 +52,89 @@ def _day_bounds_utc(target_date: date) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _build_pod_annotation_lookup(
+    annotations_payload: dict[str, Any],
+) -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str]]:
+    by_uid: dict[tuple[str, str, str], str] = {}
+    by_pod: dict[tuple[str, str], str] = {}
+
+    for series in annotations_payload.get("data", {}).get("result", []):
+        labels = series.get("metric", {}) or {}
+        namespace = str(labels.get("namespace") or "")
+        pod = str(labels.get("pod") or "")
+        uid = str(labels.get("uid") or "")
+        username = str(labels.get("annotation_nrp_ai_username") or "").strip()
+
+        if not namespace or not pod or not username:
+            continue
+
+        if uid:
+            by_uid.setdefault((namespace, pod, uid), username)
+        by_pod.setdefault((namespace, pod), username)
+
+    return by_uid, by_pod
+
+
+def attach_pod_annotations_to_resource_payload(
+    resource_payload: dict[str, Any],
+    annotations_payload: dict[str, Any],
+) -> dict[str, Any]:
+    annotation_by_uid, annotation_by_pod = _build_pod_annotation_lookup(annotations_payload)
+    data = resource_payload.get("data", {})
+    result = data.get("result", [])
+    enriched_result: list[dict[str, Any]] = []
+
+    for series in result:
+        enriched_series = dict(series)
+        labels = dict(series.get("metric", {}) or {})
+        namespace = str(labels.get("namespace") or "")
+        pod = str(labels.get("pod") or "")
+        uid = str(labels.get("uid") or "")
+
+        username = labels.get("annotation_nrp_ai_username")
+        if not username and namespace and pod:
+            username = annotation_by_uid.get((namespace, pod, uid)) if uid else None
+            username = username or annotation_by_pod.get((namespace, pod))
+
+        if username:
+            labels["annotation_nrp_ai_username"] = str(username)
+
+        enriched_series["metric"] = labels
+        enriched_result.append(enriched_series)
+
+    enriched_data = dict(data)
+    enriched_data["result"] = enriched_result
+    enriched_payload = dict(resource_payload)
+    enriched_payload["data"] = enriched_data
+    return enriched_payload
+
+
 def _query_allocated_resources(
     *,
     end_ts: datetime,
     settings: Settings,
 ) -> dict[str, dict[str, Any]]:
-    query = ALLOCATED_RESOURCES_QUERY_TEMPLATE.format(end_ts=int(end_ts.timestamp()))
-    payload = query_prometheus(
-        query,
+    end_timestamp = int(end_ts.timestamp())
+    resource_query = POD_RESOURCE_REQUESTS_QUERY_TEMPLATE.format(end_ts=end_timestamp)
+    resource_payload = query_prometheus(
+        resource_query,
         settings=settings,
         timeout_seconds=settings.PROMETHEUS_TIMEOUT_SECONDS,
         retry_limit=settings.RETRY_LIMIT,
     )
-    return {"namespace_allocated_resources": payload}
+
+    annotations_query = POD_ANNOTATIONS_QUERY_TEMPLATE.format(end_ts=end_timestamp)
+    annotations_payload = query_prometheus(
+        annotations_query,
+        settings=settings,
+        timeout_seconds=settings.PROMETHEUS_TIMEOUT_SECONDS,
+        retry_limit=settings.RETRY_LIMIT,
+    )
+    enriched_payload = attach_pod_annotations_to_resource_payload(
+        resource_payload,
+        annotations_payload,
+    )
+    return {POD_RESOURCE_METRIC_NAME: enriched_payload}
 
 
 def _query_llm_token_usage(

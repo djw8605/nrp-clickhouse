@@ -13,6 +13,6 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY nrp_accounting_pipeline ./nrp_accounting_pipeline
-COPY etl.py backfill.py institution_import.py ./
+COPY etl.py backfill.py institution_import.py xdmod_upload.py ./
 
 ENTRYPOINT ["python", "etl.py"]

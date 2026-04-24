@@ -174,6 +174,7 @@ def insert_pod_usage(
                     "created_by",
                     "node",
                     "pod_hash",
+                    "pod_uid",
                     "pod_name",
                     "resource",
                     "usage",

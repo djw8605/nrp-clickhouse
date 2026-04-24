@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nrp-accounting-pod-name-backfill-20240101-20260423
+  labels:
+    app.kubernetes.io/component: pod-name-backfill
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 604800
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: pod-name-backfill
+    spec:
+      serviceAccountName: nrp-accounting-pipeline
+      restartPolicy: Never
+      containers:
+        - name: backfill
+          image: ghcr.io/djw8605/nrp-clickhouse:latest
+          imagePullPolicy: Always
+          command: ["python", "backfill.py"]
+          args:
+            - "--start"
+            - "$(BACKFILL_START_DATE)"
+            - "--end"
+            - "$(BACKFILL_END_DATE)"
+            - "--force"
+          env:
+            - name: BACKFILL_START_DATE
+              value: "2024-01-01"
+            - name: BACKFILL_END_DATE
+              value: "2026-04-23"
+          envFrom:
+            - configMapRef:
+                name: nrp-accounting-config
+            - secretRef:
+                name: nrp-accounting-secrets
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "6"
+              memory: "12Gi"

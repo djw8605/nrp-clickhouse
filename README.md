@@ -10,7 +10,7 @@ The pipeline writes three usage tables:
 2. `cluster_namespace_usage_daily` (low cardinality, accounting totals)
 3. `llm_token_usage_daily` (daily LLM token detail)
 
-`cluster_pod_usage_daily` stores both `pod_name` and `pod_hash` (`CityHash64`) so large pod-cardinality workloads remain query-efficient while retaining a debug-friendly raw pod identifier.
+`cluster_pod_usage_daily` stores `pod_uid`, `pod_name`, and `pod_hash` (`CityHash64`) so large pod-cardinality workloads remain query-efficient while retaining Kubernetes pod identity and a debug-friendly raw pod identifier.
 The Kubernetes infrastructure usage tables include a `node` dimension so namespace-level summaries can be broken down by the node where jobs ran.
 `llm_token_usage_daily` stores token-level daily totals from the Envoy AI gateway Prometheus metric and also feeds synthetic namespace-level `llm` rows into `cluster_namespace_usage_daily`.
 The ETL also maintains a namespace dimension table populated from `portal.nrp.ai`.
@@ -31,6 +31,7 @@ Columns:
 - `created_by LowCardinality(String)`
 - `node LowCardinality(String)`
 - `pod_hash UInt64`
+- `pod_uid String`
 - `pod_name String`
 - `resource LowCardinality(String)`
 - `usage Decimal64(6)`
@@ -98,8 +99,9 @@ Columns:
 
 ## What Data Goes Where
 
-- Source metric: `namespace_allocated_resources`
-- Daily query method: `sum_over_time(namespace_allocated_resources[1d:5m]@end_ts)`
+- Source metric: `kube_pod_container_resource_requests`
+- Daily query method: `sum_over_time(kube_pod_container_resource_requests[1d:5m]@end_ts)`
+- User attribution source: `max_over_time(kube_pod_annotations[1d:5m]@end_ts)` joined locally by namespace, pod, and UID
 - LLM source metric: `gen_ai_client_token_usage_sum`
 - LLM daily query method: `sum(increase(gen_ai_client_token_usage_sum[1d]@end_ts)) by (team_id, token_alias, gen_ai_original_model, gen_ai_token_type)`
 - Resource normalization:
@@ -122,7 +124,7 @@ Columns:
 
 Row placement:
 
-- `cluster_pod_usage_daily`: one row per `(date, namespace, created_by, node, pod_name, resource, unit)` with `pod_hash` derived from `pod_name`.
+- `cluster_pod_usage_daily`: one row per `(date, namespace, created_by, node, pod_uid, pod_name, resource, unit)` with `pod_hash` derived from `pod_name`.
 - `cluster_namespace_usage_daily`: sum of pod usage grouped by `(date, namespace, created_by, node, resource, unit)`.
 - `llm_token_usage_daily`: one row per `(date, namespace, token_alias, model, token_type)` with `tokens_used` from the AI gateway Prometheus counter increase.
 - `cluster_namespace_usage_daily` also receives one synthetic LLM row per `(date, namespace)` with `resource='llm'`, `unit='tokens'`, `created_by='llm-gateway'`, and `node='llm-gateway'`.
@@ -153,6 +155,11 @@ export QUERY_STEP="1h"
 export RETRY_LIMIT=4
 export PORTAL_TIMEOUT_SECONDS=60
 export INSTITUTION_CSV_URL="https://raw.githubusercontent.com/djw8605/nrp-ror-labeler/refs/heads/main/node-institution.csv"
+export XDMOD_ENDPOINT="https://xdmod.example.org/usage"
+export XDMOD_AUTH_HEADER="Authorization"
+export XDMOD_AUTH_VALUE="Bearer ..."
+export XDMOD_MAX_RECORDS_PER_POST=5000
+export XDMOD_MAX_BYTES_PER_POST=5000000
 ```
 
 `CLICKHOUSE_HOST` supports `host` or `host:port`. If a port is embedded in `CLICKHOUSE_HOST`, it takes precedence over `CLICKHOUSE_PORT`.
@@ -169,13 +176,14 @@ kubectl apply -k k8s/overlays/prod
 
 Files to customize before apply:
 
-- `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, and `MCPO_API_KEY`
+- `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `MCPO_API_KEY`, `XDMOD_ENDPOINT`, and optional XDMod auth values
 - `k8s/overlays/prod/kustomization.yaml`: set your pipeline image name/tag
-- `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, and runtime tuning values
+- `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, XDMod upload limits, and runtime tuning values
 
 Deployed components:
 
 - `CronJob/nrp-accounting-etl`: daily accounting ETL
+- `CronJob/nrp-accounting-xdmod-upload`: daily XDMod upload, separate from ETL so XDMod failures do not affect ClickHouse ingestion
 - `Deployment/nrp-accounting-mcp`: read-only MCP server over streamable HTTP
 - `Deployment/nrp-accounting-openapi`: OpenAPI bridge for Open WebUI and other OpenAPI clients
 - `Service/nrp-accounting-mcp`: cluster-internal service on port `8000`
@@ -214,6 +222,14 @@ Run a one-time backfill job:
 kubectl apply -k k8s/backfill
 ```
 
+Run the pod-name reingestion backfill:
+
+```bash
+kubectl apply -k k8s/pod-name-backfill
+```
+
+This job runs `python backfill.py --force` for the date range in [k8s/pod-name-backfill/backfill-job.yaml](/Users/derekweitzel/git/nrp-clickhouse/k8s/pod-name-backfill/backfill-job.yaml). Forced backfills rewrite both pod-level and namespace-level daily rows for each date.
+
 ## Run Daily ETL
 
 ```bash
@@ -229,6 +245,21 @@ Options:
 - `--force`: reprocess date even if already ingested
 - `--test`: run full aggregation pipeline from mock Prometheus JSON only
 - `--mock-file /path/to/mock.json`: override default test payload file
+
+## Upload Daily XDMod Usage
+
+```bash
+python xdmod_upload.py --date 2026-03-13
+```
+
+The XDMod uploader reads already-ingested `cluster_pod_usage_daily` rows from ClickHouse, joins `namespace_metadata_mapping` for the namespace institution, and POSTs one JSON array of daily pod records to `XDMOD_ENDPOINT`. If the payload exceeds `XDMOD_MAX_RECORDS_PER_POST` or `XDMOD_MAX_BYTES_PER_POST`, it is split into multiple POSTs. An HTTP `413` response also causes the current batch to be split and retried.
+
+The Kubernetes uploader is intentionally a separate CronJob from `nrp-accounting-etl`, scheduled later in the morning. Its success or failure does not change Prometheus-to-ClickHouse ingestion.
+
+Options:
+
+- `--dry-run`: print the XDMod payload without sending it
+- `--require-data`: fail when no ClickHouse pod usage exists for the date
 
 ## Backfill
 
@@ -410,7 +441,7 @@ ORDER BY u.date DESC, u.namespace, u.node, u.resource;
 
 ## Reliability + Idempotency
 
-- Daily usage query via `sum_over_time(namespace_allocated_resources[1d:5m]@end_ts)`
+- Daily usage query via `sum_over_time(kube_pod_container_resource_requests[1d:5m]@end_ts)`, enriched with pod annotations for user attribution
 - Retries with exponential backoff for Prometheus, `portal.nrp.ai`, and ClickHouse operations
 - Idempotent daily writes by deleting existing date rows before insert
 - Namespace metadata rows are inserted for new namespaces and updated when portal metadata changes

@@ -174,11 +174,31 @@ def merge_namespace_metadata_rows(
 
     for raw_namespace in observed_namespaces:
         namespace = raw_namespace.strip()
-        if namespace and namespace not in merged_rows:
-            merged_rows[namespace] = NamespaceMetadataRecord.unknown(
-                namespace,
-                updated_at=updated_at,
+        if not namespace or namespace in merged_rows:
+            continue
+
+        # Some LLM accounting namespaces are derived from a base portal namespace,
+        # for example `wang-research-lab-llms` in metrics vs `wang-research-lab`
+        # in portal metadata. Reuse the base namespace metadata when available.
+        alias_source = None
+        if namespace.endswith("-llms"):
+            alias_source = merged_rows.get(namespace[: -len("-llms")])
+
+        if alias_source is not None:
+            merged_rows[namespace] = NamespaceMetadataRecord(
+                namespace=namespace,
+                pi=alias_source.pi,
+                institution=alias_source.institution,
+                admins=alias_source.admins,
+                user_institutions=alias_source.user_institutions,
+                updated_at=alias_source.updated_at,
             )
+            continue
+
+        merged_rows[namespace] = NamespaceMetadataRecord.unknown(
+            namespace,
+            updated_at=updated_at,
+        )
 
     rows = [merged_rows[name] for name in sorted(merged_rows)]
     logger.info(

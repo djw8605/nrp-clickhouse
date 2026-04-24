@@ -13,5 +13,6 @@ __all__ = [
     "logging_config",
     "institution_import",
     "accounting_queries",
+    "xdmod_upload",
     "mcp_server",
 ]

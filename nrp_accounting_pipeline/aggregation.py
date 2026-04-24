@@ -203,7 +203,10 @@ def _series_usage_for_metric(metric_name: str, resource_name: str, points: list[
     normalized = normalize_resource(resource_name)
     metric = metric_name.lower()
 
-    if "namespace_allocated_resources" in metric:
+    if (
+        "namespace_allocated_resources" in metric
+        or "kube_pod_container_resource_requests" in metric
+    ):
         raw_value = sum(value for _, value in points)
         # sum_over_time sums one sample per subquery step; divide by
         # SAMPLES_PER_HOUR to convert to hourly units (core-hours, gb-hours).
@@ -235,7 +238,7 @@ def aggregate_daily_metrics(
     results: Mapping[str, Mapping[str, Any]],
     target_date: date,
 ) -> list[PodUsageRecord]:
-    aggregated: dict[tuple[str, str, str, str, str, str], float] = defaultdict(float)
+    aggregated: dict[tuple[str, str, str, str, str, str, str], float] = defaultdict(float)
 
     for metric_name, payload in results.items():
         data = payload.get("data", {})
@@ -244,7 +247,8 @@ def aggregate_daily_metrics(
         for series in series_list:
             labels = series.get("metric", {}) or {}
             namespace = labels.get("namespace") or "unknown"
-            pod_name = labels.get("pod") or "unknown"
+            pod_name = labels.get("pod") or labels.get("pod_name") or "unknown"
+            pod_uid = str(labels.get("uid") or labels.get("pod_uid") or "")
             created_by = (
                 labels.get("annotation_nrp_ai_username")
                 or labels.get("created_by")
@@ -267,7 +271,7 @@ def aggregate_daily_metrics(
                 continue
 
             usage_value = _series_usage_for_metric(metric_name, raw_resource, points)
-            key = (namespace, created_by, node, pod_name, resource, unit)
+            key = (namespace, created_by, node, pod_name, pod_uid, resource, unit)
             aggregated[key] += usage_value
 
     pod_rows = [
@@ -277,12 +281,21 @@ def aggregate_daily_metrics(
             created_by=created_by,
             node=node,
             pod_hash=compute_pod_hash(pod_name),
+            pod_uid=pod_uid,
             pod_name=pod_name,
             resource=resource,
             usage=quantize_usage(usage),
             unit=unit,
         )
-        for (namespace, created_by, node, pod_name, resource, unit), usage in aggregated.items()
+        for (
+            namespace,
+            created_by,
+            node,
+            pod_name,
+            pod_uid,
+            resource,
+            unit,
+        ), usage in aggregated.items()
     ]
 
     pod_rows.sort(
@@ -292,6 +305,7 @@ def aggregate_daily_metrics(
             row.node,
             row.resource,
             row.pod_hash,
+            row.pod_uid,
             row.created_by,
             row.pod_name,
         )

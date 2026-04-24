@@ -20,6 +20,7 @@ POD_EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("created_by", "LowCardinality(String)"),
     ("node", "LowCardinality(String)"),
     ("pod_hash", "UInt64"),
+    ("pod_uid", "String"),
     ("pod_name", "String"),
     ("resource", "LowCardinality(String)"),
     ("usage", "Decimal64(6)"),
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, POD_TABLE_NAME)}
     created_by LowCardinality(String),
     node LowCardinality(String),
     pod_hash UInt64,
+    pod_uid String,
     pod_name String,
     resource LowCardinality(String),
     usage Decimal64(6),
@@ -92,7 +94,7 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, POD_TABLE_NAME)}
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(date)
-ORDER BY (date, namespace, node, resource, pod_hash)
+ORDER BY (date, namespace, node, resource, pod_hash, pod_uid)
 """.strip()
 
 

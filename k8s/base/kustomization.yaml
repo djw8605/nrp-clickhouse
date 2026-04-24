@@ -8,6 +8,7 @@ resources:
   - configmap.yaml
   - secret.yaml
   - cronjob-etl.yaml
+  - cronjob-xdmod-upload.yaml
   - deployment-mcp.yaml
   - deployment-openapi.yaml
   - service-mcp.yaml

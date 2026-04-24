@@ -20,6 +20,7 @@ class PodUsageRecord:
     created_by: str
     node: str
     pod_hash: int
+    pod_uid: str
     pod_name: str
     resource: str
     usage: Decimal
@@ -32,6 +33,7 @@ class PodUsageRecord:
             self.created_by,
             self.node,
             self.pod_hash,
+            self.pod_uid,
             self.pod_name,
             self.resource,
             self.usage,
@@ -45,6 +47,7 @@ class PodUsageRecord:
             "created_by": self.created_by,
             "node": self.node,
             "pod_hash": self.pod_hash,
+            "pod_uid": self.pod_uid,
             "pod_name": self.pod_name,
             "resource": self.resource,
             "usage": float(self.usage),

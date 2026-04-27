@@ -4,24 +4,24 @@ kind: Kustomization
 namespace: access-accounting
 
 resources:
-  - ../../../../k8s/base
-  - sealed-secret.yaml
+- ../../../../k8s/base
+- sealed-secret.yaml
 
 patches:
-  - path: configmap.yaml
-    target:
-      kind: ConfigMap
-      name: nrp-accounting-config
-  - path: mcp-ingress.yaml
-    target:
-      kind: Ingress
-      name: nrp-accounting-mcp
-  - path: patches.yaml
-    target:
-      kind: Secret
-      name: nrp-accounting-secrets
+- path: configmap.yaml
+  target:
+    kind: ConfigMap
+    name: nrp-accounting-config
+- path: mcp-ingress.yaml
+  target:
+    kind: Ingress
+    name: nrp-accounting-mcp
+- path: patches.yaml
+  target:
+    kind: Secret
+    name: nrp-accounting-secrets
 
 images:
-  - name: ghcr.io/djw8605/nrp-clickhouse
-    newName: ghcr.io/djw8605/nrp-clickhouse
-    newTag: sha-72709fa
+- name: ghcr.io/djw8605/nrp-clickhouse
+  newName: ghcr.io/djw8605/nrp-clickhouse
+  newTag: sha-c690505d24ef678ef580e9bd5095921b99289a88

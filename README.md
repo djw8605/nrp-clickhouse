@@ -181,10 +181,26 @@ Apply production overlay:
 kubectl apply -k k8s/overlays/prod
 ```
 
+GitOps deployment overlay:
+
+```bash
+kubectl kustomize apps/nrp-clickhouse/overlays/dev
+```
+
+Argo CD application:
+
+```bash
+kubectl apply -f argocd/application-nrp-clickhouse-dev.yaml
+```
+
+The Argo application watches this repo at `apps/nrp-clickhouse/overlays/dev`. A push to `main` runs `.github/workflows/build-and-push.yml`, builds and publishes `ghcr.io/djw8605/nrp-clickhouse:sha-<commit>`, updates that immutable tag in the overlay with `kustomize edit set image`, and commits the kustomization change back to `main`. Argo then sees the Git change and reconciles the deployment.
+
 Files to customize before apply:
 
 - `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `MCPO_API_KEY`, `XDMOD_ENDPOINT`, and optional XDMod auth values
 - `k8s/overlays/prod/kustomization.yaml`: set your pipeline image name/tag
+- `apps/nrp-clickhouse/overlays/dev/kustomization.yaml`: GitOps overlay watched by Argo CD; the image tag is updated by GitHub Actions
+- `apps/nrp-clickhouse/overlays/dev/sealed-secret.yaml`: encrypted ClickHouse and MCPO credentials for the `access-accounting` namespace
 - `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, XDMod upload limits, and runtime tuning values
 
 Deployed components:
@@ -210,9 +226,9 @@ If you want a different public subdomain, update the `host` value in [ingress-mc
 
 Image pull behavior:
 
-- The manifests currently use the mutable `:latest` image tag.
-- To avoid stale cached images on Kubernetes nodes, ETL, backfill, and MCP workloads use `imagePullPolicy: Always`.
-- For production-grade releases, prefer replacing `latest` in the overlay with an immutable tag such as a Git SHA image tag from the GitHub Actions build.
+- Base manifests use `:latest` as a local/default tag.
+- The GitOps overlay pins an immutable `sha-<commit>` tag so Argo CD gets a concrete desired-state change on every `main` deployment.
+- ETL, XDMod upload, MCP, and OpenAPI workloads use `imagePullPolicy: Always`.
 
 MCP transport security:
 

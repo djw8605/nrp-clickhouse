@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nrp-accounting-mcp
+spec:
+  rules:
+    - host: nrp-accounting-mcp.nrp-nautilus.io
+      http:
+        paths:
+          - path: /openapi
+            pathType: Prefix
+            backend:
+              service:
+                name: nrp-accounting-openapi
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nrp-accounting-mcp
+                port:
+                  number: 8000
+  tls:
+    - hosts:
+        - nrp-accounting-mcp.nrp-nautilus.io

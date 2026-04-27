@@ -43,6 +43,8 @@ Thumbs.db
 .env.*
 *.pem
 *.key
+apps/**/nrp-accounting-secrets.yaml
+secrets/*.plaintext.yaml
 
 # Logs and temporary files
 *.log

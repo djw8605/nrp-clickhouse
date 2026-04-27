@@ -48,6 +48,9 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in environments with
 def normalize_resource(resource_name: str) -> str:
     value = (resource_name or "").lower()
 
+    if should_ignore_resource(value):
+        return "other"
+
     if value in {"llm", "llm_tokens"}:
         return LLM_RESOURCE
 
@@ -75,6 +78,11 @@ def normalize_resource(resource_name: str) -> str:
     if "storage" in value or "fs_usage" in value:
         return "storage"
     return "other"
+
+
+def should_ignore_resource(resource_name: str) -> bool:
+    value = (resource_name or "").strip().lower()
+    return value != "memory" and value.endswith("_memory")
 
 
 def resource_unit(resource_name: str) -> str:
@@ -259,6 +267,13 @@ def aggregate_daily_metrics(
             node = _extract_node_label(labels)
 
             raw_resource = labels.get("resource") or metric_name
+            if should_ignore_resource(raw_resource):
+                logger.debug(
+                    "aggregation_skip_ignored_resource",
+                    extra={"metric": metric_name, "resource": raw_resource, "labels": labels},
+                )
+                continue
+
             resource = normalize_resource(raw_resource)
             unit = resource_unit(resource)
             points = _extract_sample_points(series)

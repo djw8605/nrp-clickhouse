@@ -373,6 +373,7 @@ def test_llm_aggregation_preserves_common_token_types(aggregated_llm):
         ("memory", "memory"),
         ("ephemeral_storage", "storage"),
         ("nvidia_com_gpu", "gpu"),
+        ("nvidia_com_gpu_memory", "other"),
         ("amd_com_xilinx_u250", "fpga"),
         ("network_receive_bytes_total", "network"),
     ],

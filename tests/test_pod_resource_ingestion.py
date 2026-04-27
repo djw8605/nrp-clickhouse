@@ -93,3 +93,39 @@ def test_aggregate_daily_metrics_uses_pod_level_resource_requests() -> None:
     assert by_resource["cpu"].created_by == "jane.doe"
     assert by_resource["cpu"].usage == Decimal("2.000000")
     assert by_resource["memory"].usage == Decimal("1.000000")
+
+
+def test_aggregate_daily_metrics_ignores_extended_gpu_memory_resources() -> None:
+    payload = {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "namespace": "lemn-lab",
+                        "pod": "hongao-job-test-82jrc",
+                        "uid": "pod-uid-1",
+                        "node": "gpu-node-a",
+                        "resource": "nvidia_com_gpu",
+                    },
+                    "value": [1765584000, "2"],
+                },
+                {
+                    "metric": {
+                        "namespace": "lemn-lab",
+                        "pod": "hongao-job-test-82jrc",
+                        "uid": "pod-uid-1",
+                        "node": "gpu-node-a",
+                        "resource": "nvidia_com_gpu_memory",
+                    },
+                    "value": [1765584000, "68719476736"],
+                },
+            ]
+        }
+    }
+
+    rows = aggregate_daily_metrics(
+        {"kube_pod_container_resource_requests": payload},
+        target_date=date(2025, 12, 12),
+    )
+
+    assert [(row.resource, row.usage) for row in rows] == [("gpu", Decimal("0.166667"))]

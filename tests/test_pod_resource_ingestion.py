@@ -8,6 +8,7 @@ from nrp_accounting_pipeline.aggregation import (
     aggregate_namespace_usage,
 )
 from nrp_accounting_pipeline.etl import (
+    GPU_MODEL_QUERY_TEMPLATE,
     attach_gpu_model_names_to_resource_payload,
     attach_pod_annotations_to_resource_payload,
 )
@@ -56,6 +57,12 @@ def test_attach_pod_annotations_to_resource_payload_matches_by_uid() -> None:
     metric = enriched["data"]["result"][0]["metric"]
     assert metric["pod"] == "trainer-0"
     assert metric["annotation_nrp_ai_username"] == "jane.doe"
+
+
+def test_gpu_model_query_template_preserves_prometheus_label_selector() -> None:
+    query = GPU_MODEL_QUERY_TEMPLATE.format(end_ts=1769040000)
+
+    assert query == 'max_over_time(DCGM_FI_DEV_GPU_UTIL{modelName!=""}[1d:5m]@1769040000)'
 
 
 def test_aggregate_daily_metrics_uses_pod_level_resource_requests() -> None:

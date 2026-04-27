@@ -38,7 +38,7 @@ POD_ANNOTATIONS_QUERY_TEMPLATE = (
     "max_over_time(kube_pod_annotations[1d:5m]@{end_ts})"
 )
 GPU_MODEL_QUERY_TEMPLATE = (
-    'max_over_time(DCGM_FI_DEV_GPU_UTIL{modelName!=""}[1d:5m]@{end_ts})'
+    'max_over_time(DCGM_FI_DEV_GPU_UTIL{{modelName!=""}}[1d:5m]@{end_ts})'
 )
 LLM_TOKEN_USAGE_QUERY_TEMPLATE = (
     "sum(increase(gen_ai_client_token_usage_sum[1d]@{end_ts})) "

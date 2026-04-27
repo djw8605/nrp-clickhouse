@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping
+from datetime import datetime, timezone
 
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,9 @@ NAMESPACE_TABLE_NAME = "cluster_namespace_usage_daily"
 LLM_TOKEN_TABLE_NAME = "llm_token_usage_daily"
 NODE_INSTITUTION_TABLE_NAME = "node_institution_mapping"
 NAMESPACE_METADATA_TABLE_NAME = "namespace_metadata_mapping"
+NAMESPACE_SORTING_KEY = (
+    "date, namespace, created_by, node, resource, raw_resource, gpu_model_name, unit"
+)
 
 POD_EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("date", "Date"),
@@ -23,6 +27,8 @@ POD_EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("pod_uid", "String"),
     ("pod_name", "String"),
     ("resource", "LowCardinality(String)"),
+    ("raw_resource", "LowCardinality(String)"),
+    ("gpu_model_name", "LowCardinality(String)"),
     ("usage", "Decimal64(6)"),
     ("unit", "LowCardinality(String)"),
 ]
@@ -33,6 +39,8 @@ NAMESPACE_EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("created_by", "LowCardinality(String)"),
     ("node", "LowCardinality(String)"),
     ("resource", "LowCardinality(String)"),
+    ("raw_resource", "LowCardinality(String)"),
+    ("gpu_model_name", "LowCardinality(String)"),
     ("usage", "Decimal64(6)"),
     ("unit", "LowCardinality(String)"),
 ]
@@ -89,31 +97,39 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, POD_TABLE_NAME)}
     pod_uid String,
     pod_name String,
     resource LowCardinality(String),
+    raw_resource LowCardinality(String),
+    gpu_model_name LowCardinality(String),
     usage Decimal64(6),
     unit LowCardinality(String)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(date)
-ORDER BY (date, namespace, node, resource, pod_hash, pod_uid)
+ORDER BY (date, namespace, node, resource, raw_resource, gpu_model_name, pod_hash, pod_uid)
 """.strip()
 
 
-def create_namespace_table_sql(database: str) -> str:
+def _create_namespace_table_sql(database: str, table_name: str) -> str:
     return f"""
-CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NAMESPACE_TABLE_NAME)}
+CREATE TABLE IF NOT EXISTS {table_qualified_name(database, table_name)}
 (
     date Date,
     namespace LowCardinality(String),
     created_by LowCardinality(String),
     node LowCardinality(String),
     resource LowCardinality(String),
+    raw_resource LowCardinality(String),
+    gpu_model_name LowCardinality(String),
     usage Decimal64(6),
     unit LowCardinality(String)
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(date)
-ORDER BY (date, namespace, node, resource)
+ORDER BY ({NAMESPACE_SORTING_KEY})
 """.strip()
+
+
+def create_namespace_table_sql(database: str) -> str:
+    return _create_namespace_table_sql(database, NAMESPACE_TABLE_NAME)
 
 
 def create_llm_token_table_sql(database: str) -> str:
@@ -164,6 +180,76 @@ ORDER BY namespace
 def _fetch_existing_columns(client, database: str, table_name: str) -> Mapping[str, str]:
     describe = client.query(f"DESCRIBE TABLE {table_qualified_name(database, table_name)}")
     return {row[0]: row[1] for row in describe.result_rows}
+
+
+def _sql_string_literal(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def _normalize_sorting_key(value: str) -> str:
+    normalized = re.sub(r"[`\s()]+", "", value or "").lower()
+    return normalized
+
+
+def _fetch_sorting_key(client, database: str, table_name: str) -> str:
+    result = client.query(
+        "SELECT sorting_key FROM system.tables "
+        f"WHERE database = {_sql_string_literal(database)} "
+        f"AND name = {_sql_string_literal(table_name)}"
+    )
+    if not result.result_rows:
+        return ""
+    return str(result.result_rows[0][0] or "")
+
+
+def _namespace_rebuild_select_expression(column_name: str) -> str:
+    if column_name == "raw_resource":
+        return "if(empty(raw_resource), resource, raw_resource) AS raw_resource"
+    if column_name == "gpu_model_name":
+        return (
+            "if(empty(gpu_model_name), "
+            "if(resource = 'gpu', 'unknown', 'not_applicable'), "
+            "gpu_model_name) AS gpu_model_name"
+        )
+    return column_name
+
+
+def _rebuild_namespace_table_if_sort_key_changed(client, database: str) -> None:
+    actual_sorting_key = _fetch_sorting_key(client, database, NAMESPACE_TABLE_NAME)
+    if not actual_sorting_key:
+        return
+
+    if _normalize_sorting_key(actual_sorting_key) == _normalize_sorting_key(NAMESPACE_SORTING_KEY):
+        return
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    replacement_table = f"{NAMESPACE_TABLE_NAME}__gpu_model_rebuild_{timestamp}"
+    backup_table = f"{NAMESPACE_TABLE_NAME}__pre_gpu_model_{timestamp}"
+    column_names = [column_name for column_name, _ in NAMESPACE_EXPECTED_COLUMNS]
+    columns_sql = ", ".join(column_names)
+    select_sql = ", ".join(_namespace_rebuild_select_expression(column) for column in column_names)
+
+    logger.warning(
+        "schema_rebuild_namespace_sorting_key",
+        extra={
+            "table": NAMESPACE_TABLE_NAME,
+            "actual_sorting_key": actual_sorting_key,
+            "expected_sorting_key": NAMESPACE_SORTING_KEY,
+            "backup_table": backup_table,
+        },
+    )
+    client.command(_create_namespace_table_sql(database, replacement_table))
+    client.command(
+        f"INSERT INTO {table_qualified_name(database, replacement_table)} ({columns_sql}) "
+        f"SELECT {select_sql} FROM {table_qualified_name(database, NAMESPACE_TABLE_NAME)}"
+    )
+    client.command(
+        f"RENAME TABLE {table_qualified_name(database, NAMESPACE_TABLE_NAME)} "
+        f"TO {table_qualified_name(database, backup_table)}, "
+        f"{table_qualified_name(database, replacement_table)} "
+        f"TO {table_qualified_name(database, NAMESPACE_TABLE_NAME)}"
+    )
 
 
 def _types_equivalent(actual: str, expected: str) -> bool:
@@ -224,6 +310,7 @@ def ensure_schema(client, database: str) -> None:
 
     _apply_table_migrations(client, database, POD_TABLE_NAME, POD_EXPECTED_COLUMNS)
     _apply_table_migrations(client, database, NAMESPACE_TABLE_NAME, NAMESPACE_EXPECTED_COLUMNS)
+    _rebuild_namespace_table_if_sort_key_changed(client, database)
     _apply_table_migrations(client, database, LLM_TOKEN_TABLE_NAME, LLM_TOKEN_EXPECTED_COLUMNS)
     _apply_table_migrations(
         client,

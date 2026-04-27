@@ -37,6 +37,10 @@ LLM_RESOURCE = "llm"
 LLM_CREATED_BY = "llm-gateway"
 LLM_NODE = "llm-gateway"
 UNKNOWN_LABEL_VALUE = "unknown"
+GPU_MODEL_UNKNOWN = "unknown"
+GPU_MODEL_MIXED = "mixed"
+GPU_MODEL_NOT_APPLICABLE = "not_applicable"
+GPU_RAW_RESOURCE = "gpu"
 
 try:
     import cityhash  # type: ignore
@@ -83,6 +87,28 @@ def normalize_resource(resource_name: str) -> str:
 def should_ignore_resource(resource_name: str) -> bool:
     value = (resource_name or "").strip().lower()
     return value != "memory" and value.endswith("_memory")
+
+
+def gpu_model_from_raw_resource(resource_name: str) -> str | None:
+    value = (resource_name or "").strip().lower()
+    if not value.startswith("nvidia_com_"):
+        return None
+
+    suffix = value.removeprefix("nvidia_com_")
+    if not suffix or suffix in {"gpu", "gpus", "gpu_shared"} or suffix.endswith("_memory"):
+        return None
+    return suffix
+
+
+def gpu_model_name_for_resource(resource: str, raw_resource: str, labels: Mapping[str, Any]) -> str:
+    if resource != GPU_RAW_RESOURCE:
+        return GPU_MODEL_NOT_APPLICABLE
+
+    label_model = str(labels.get("gpu_model_name") or "").strip()
+    if label_model:
+        return label_model
+
+    return gpu_model_from_raw_resource(raw_resource) or GPU_MODEL_UNKNOWN
 
 
 def resource_unit(resource_name: str) -> str:
@@ -246,7 +272,7 @@ def aggregate_daily_metrics(
     results: Mapping[str, Mapping[str, Any]],
     target_date: date,
 ) -> list[PodUsageRecord]:
-    aggregated: dict[tuple[str, str, str, str, str, str, str], float] = defaultdict(float)
+    aggregated: dict[tuple[str, str, str, str, str, str, str, str, str], float] = defaultdict(float)
 
     for metric_name, payload in results.items():
         data = payload.get("data", {})
@@ -275,6 +301,8 @@ def aggregate_daily_metrics(
                 continue
 
             resource = normalize_resource(raw_resource)
+            raw_resource_name = str(raw_resource)
+            gpu_model_name = gpu_model_name_for_resource(resource, raw_resource_name, labels)
             unit = resource_unit(resource)
             points = _extract_sample_points(series)
 
@@ -286,7 +314,17 @@ def aggregate_daily_metrics(
                 continue
 
             usage_value = _series_usage_for_metric(metric_name, raw_resource, points)
-            key = (namespace, created_by, node, pod_name, pod_uid, resource, unit)
+            key = (
+                namespace,
+                created_by,
+                node,
+                pod_name,
+                pod_uid,
+                resource,
+                raw_resource_name,
+                gpu_model_name,
+                unit,
+            )
             aggregated[key] += usage_value
 
     pod_rows = [
@@ -299,6 +337,8 @@ def aggregate_daily_metrics(
             pod_uid=pod_uid,
             pod_name=pod_name,
             resource=resource,
+            raw_resource=raw_resource,
+            gpu_model_name=gpu_model_name,
             usage=quantize_usage(usage),
             unit=unit,
         )
@@ -309,6 +349,8 @@ def aggregate_daily_metrics(
             pod_name,
             pod_uid,
             resource,
+            raw_resource,
+            gpu_model_name,
             unit,
         ), usage in aggregated.items()
     ]
@@ -319,6 +361,8 @@ def aggregate_daily_metrics(
             row.namespace,
             row.node,
             row.resource,
+            row.raw_resource,
+            row.gpu_model_name,
             row.pod_hash,
             row.pod_uid,
             row.created_by,
@@ -329,10 +373,19 @@ def aggregate_daily_metrics(
 
 
 def aggregate_namespace_usage(pod_rows: Iterable[PodUsageRecord]) -> list[NamespaceUsageRecord]:
-    namespace_totals: dict[tuple[date, str, str, str, str, str], float] = defaultdict(float)
+    namespace_totals: dict[tuple[date, str, str, str, str, str, str, str], float] = defaultdict(float)
 
     for row in pod_rows:
-        key = (row.date, row.namespace, row.created_by, row.node, row.resource, row.unit)
+        key = (
+            row.date,
+            row.namespace,
+            row.created_by,
+            row.node,
+            row.resource,
+            row.raw_resource,
+            row.gpu_model_name,
+            row.unit,
+        )
         namespace_totals[key] += float(row.usage)
 
     namespace_rows = [
@@ -342,14 +395,33 @@ def aggregate_namespace_usage(pod_rows: Iterable[PodUsageRecord]) -> list[Namesp
             created_by=created_by,
             node=node,
             resource=resource,
+            raw_resource=raw_resource,
+            gpu_model_name=gpu_model_name,
             usage=quantize_usage(usage),
             unit=unit,
         )
-        for (target_date, namespace, created_by, node, resource, unit), usage in namespace_totals.items()
+        for (
+            target_date,
+            namespace,
+            created_by,
+            node,
+            resource,
+            raw_resource,
+            gpu_model_name,
+            unit,
+        ), usage in namespace_totals.items()
     ]
 
     namespace_rows.sort(
-        key=lambda row: (row.date, row.namespace, row.node, row.resource, row.created_by)
+        key=lambda row: (
+            row.date,
+            row.namespace,
+            row.node,
+            row.resource,
+            row.raw_resource,
+            row.gpu_model_name,
+            row.created_by,
+        )
     )
     return namespace_rows
 
@@ -418,6 +490,8 @@ def aggregate_llm_namespace_usage(
             created_by=LLM_CREATED_BY,
             node=LLM_NODE,
             resource=LLM_RESOURCE,
+            raw_resource=LLM_RESOURCE,
+            gpu_model_name=GPU_MODEL_NOT_APPLICABLE,
             usage=quantize_usage(tokens_used),
             unit=resource_unit(LLM_RESOURCE),
         )

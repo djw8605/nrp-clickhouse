@@ -12,6 +12,7 @@ The pipeline writes three usage tables:
 
 `cluster_pod_usage_daily` stores `pod_uid`, `pod_name`, and `pod_hash` (`CityHash64`) so large pod-cardinality workloads remain query-efficient while retaining Kubernetes pod identity and a debug-friendly raw pod identifier.
 The Kubernetes infrastructure usage tables include a `node` dimension so namespace-level summaries can be broken down by the node where jobs ran.
+GPU usage rows also retain the source resource label in `raw_resource` and the resolved DCGM model in `gpu_model_name` so queries can filter, group, and audit GPU model attribution.
 `llm_token_usage_daily` stores token-level daily totals from the Envoy AI gateway Prometheus metric and also feeds synthetic namespace-level `llm` rows into `cluster_namespace_usage_daily`.
 The ETL also maintains a namespace dimension table populated from `portal.nrp.ai`.
 
@@ -22,7 +23,7 @@ The ETL also maintains a namespace dimension table populated from `portal.nrp.ai
 - Purpose: detailed per-pod accounting rows
 - Engine: `MergeTree`
 - Partition: `toYYYYMM(date)`
-- Order key: `(date, namespace, node, resource, pod_hash)`
+- Order key: `(date, namespace, node, resource, raw_resource, gpu_model_name, pod_hash, pod_uid)`
 
 Columns:
 
@@ -34,6 +35,8 @@ Columns:
 - `pod_uid String`
 - `pod_name String`
 - `resource LowCardinality(String)`
+- `raw_resource LowCardinality(String)`
+- `gpu_model_name LowCardinality(String)`
 - `usage Decimal64(6)`
 - `unit LowCardinality(String)`
 
@@ -42,7 +45,7 @@ Columns:
 - Purpose: namespace-level accounting summary (rolled up from pod rows plus synthetic namespace-level LLM token totals)
 - Engine: `SummingMergeTree`
 - Partition: `toYYYYMM(date)`
-- Order key: `(date, namespace, node, resource)`
+- Order key: `(date, namespace, created_by, node, resource, raw_resource, gpu_model_name, unit)`
 
 Columns:
 
@@ -51,6 +54,8 @@ Columns:
 - `created_by LowCardinality(String)`
 - `node LowCardinality(String)`
 - `resource LowCardinality(String)`
+- `raw_resource LowCardinality(String)`
+- `gpu_model_name LowCardinality(String)`
 - `usage Decimal64(6)`
 - `unit LowCardinality(String)`
 
@@ -102,12 +107,14 @@ Columns:
 - Source metric: `kube_pod_container_resource_requests`
 - Daily query method: `sum_over_time(kube_pod_container_resource_requests[1d:5m]@end_ts)`
 - User attribution source: `max_over_time(kube_pod_annotations[1d:5m]@end_ts)` joined locally by namespace, pod, and UID
+- GPU model attribution source: `max_over_time(DCGM_FI_DEV_GPU_UTIL{modelName!=""}[1d:5m]@end_ts)` joined locally by namespace, pod, and container; if that direct match is absent, the ETL falls back to a single-model DCGM `Hostname == node`, then typed `raw_resource`, then `unknown`
 - LLM source metric: `gen_ai_client_token_usage_sum`
 - LLM daily query method: `sum(increase(gen_ai_client_token_usage_sum[1d]@end_ts)) by (team_id, token_alias, gen_ai_original_model, gen_ai_token_type)`
 - Resource normalization:
   - `amd_com_xilinx* -> fpga`
   - `cpu -> cpu`
   - `nvidia_com* -> gpu`
+  - `*_memory` extended resources, such as `nvidia_com_gpu_memory`, are ignored
   - `llm -> llm`
   - `memory -> memory`
   - `ephemeral_storage -> storage`
@@ -124,10 +131,10 @@ Columns:
 
 Row placement:
 
-- `cluster_pod_usage_daily`: one row per `(date, namespace, created_by, node, pod_uid, pod_name, resource, unit)` with `pod_hash` derived from `pod_name`.
-- `cluster_namespace_usage_daily`: sum of pod usage grouped by `(date, namespace, created_by, node, resource, unit)`.
+- `cluster_pod_usage_daily`: one row per `(date, namespace, created_by, node, pod_uid, pod_name, resource, raw_resource, gpu_model_name, unit)` with `pod_hash` derived from `pod_name`.
+- `cluster_namespace_usage_daily`: sum of pod usage grouped by `(date, namespace, created_by, node, resource, raw_resource, gpu_model_name, unit)`.
 - `llm_token_usage_daily`: one row per `(date, namespace, token_alias, model, token_type)` with `tokens_used` from the AI gateway Prometheus counter increase.
-- `cluster_namespace_usage_daily` also receives one synthetic LLM row per `(date, namespace)` with `resource='llm'`, `unit='tokens'`, `created_by='llm-gateway'`, and `node='llm-gateway'`.
+- `cluster_namespace_usage_daily` also receives one synthetic LLM row per `(date, namespace)` with `resource='llm'`, `raw_resource='llm'`, `gpu_model_name='not_applicable'`, `unit='tokens'`, `created_by='llm-gateway'`, and `node='llm-gateway'`.
 
 Idempotency behavior:
 
@@ -269,6 +276,7 @@ python backfill.py --start 2025-01-01 --end 2025-02-01
 
 Backfill runs dates sequentially and is safe to restart.
 If you are enabling LLM accounting on a ClickHouse database that already has historical namespace usage rows, rerun historical dates with `--force` so `llm_token_usage_daily` and namespace-level `llm` totals are populated for those days.
+If you are enabling GPU model attribution on historical data, rerun historical dates with `--force` so pod and namespace rows are rewritten with `gpu_model_name` where DCGM/Thanos history has coverage.
 
 ## MCP Server
 
@@ -320,11 +328,14 @@ Supported filters:
 - `node_regex`: ClickHouse regex matched against `node`
 - `node_institution`: institution from `node_institution_mapping`
 - `resource`: normalized resource name such as `cpu`, `gpu`, `memory`, `storage`, `fpga`, `network`, or `llm`
+- `raw_resource`: original source resource label such as `nvidia_com_gpu`, `nvidia_com_a100`, `cpu`, or `memory`
+- `gpu_model_name`: exact DCGM GPU model value, or one of `unknown`, `mixed`, or `not_applicable`
+- `gpu_model_regex`: ClickHouse regex matched against `gpu_model_name`; normally pair this with `resource=gpu`
 - Resource aliases like `gpu_hours`, `gpu-hours`, `GPU hours`, `cpu_core_hours`, `llm_tokens`, and `tokens` are accepted and normalized automatically
 - For example, use `resource=gpu` for GPU-hours queries, `resource=cpu` for CPU core-hour queries, and `resource=llm` for namespace-level LLM token totals; units come back separately
 - Units are returned separately in the `unit` field, for example `resource=gpu` yields `unit=gpu_hours`
 - `granularity`: `namespace` or `pod`
-- `group_by`: any of `date`, `namespace`, `institution`, `pi`, `node`, `node_institution`, `created_by`, `resource`, `unit`, and `pod_name` (pod granularity only)
+- `group_by`: any of `date`, `namespace`, `institution`, `pi`, `node`, `node_institution`, `created_by`, `resource`, `raw_resource`, `gpu_model_name`, `unit`, and `pod_name` (pod granularity only)
 - LLM-specific filters: `token_alias`, `model`, and `token_type`
 - LLM-specific `group_by`: any of `date`, `namespace`, `token_alias`, `model`, and `token_type`
 
@@ -349,6 +360,8 @@ Example prompt/tool call intent:
 - "Find usage on nodes matching `^gpu-node-` grouped by namespace and resource"
 - "What namespaces exist in the latest accounting data?"
 - "Who are the top 10 GPU-consuming institutions this week?"
+- "What namespaces were the largest users of NRP A100 GPUs?" maps to `top_resource_consumers(dimension="namespace", resource="gpu", gpu_model_regex="(?i)A100")`
+- "Which GPU models are available?" maps to `list_filter_values(dimension="gpu_model_name", resource="gpu")`
 - "Show a 30-day GPU trend for namespace `foo`"
 - "Show namespace `foo` LLM token totals for the latest day"
 - "Break down namespace `foo` LLM usage by token alias and model this week"

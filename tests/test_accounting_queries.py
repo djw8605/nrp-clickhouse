@@ -96,6 +96,32 @@ def test_build_resource_usage_query_applies_filters_and_latest_date_default() ->
     assert spec.group_by == ["namespace", "institution", "node", "resource", "unit"]
 
 
+def test_build_resource_usage_query_applies_gpu_model_filters() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+        ]
+    )
+
+    spec = build_resource_usage_query(
+        client,
+        resource="gpu",
+        gpu_model_name="NVIDIA A100-SXM4-40GB",
+        gpu_model_regex="(?i)A100",
+        raw_resource="nvidia_com_gpu",
+        group_by=["namespace", "gpu_model_name", "resource", "unit"],
+        settings=TEST_SETTINGS,
+    )
+
+    assert "usage.gpu_model_name IN ('NVIDIA A100-SXM4-40GB')" in spec.sql
+    assert "match(usage.gpu_model_name, '(?i)A100')" in spec.sql
+    assert "usage.raw_resource IN ('nvidia_com_gpu')" in spec.sql
+    assert "GROUP BY usage.namespace, usage.gpu_model_name, usage.resource, usage.unit" in spec.sql
+
+
 def test_build_resource_usage_query_normalizes_resource_aliases() -> None:
     client = PatternClient(
         [
@@ -304,6 +330,38 @@ def test_list_filter_values_returns_distinct_dimension_values() -> None:
     assert "LIKE 'D%'" in client.queries[-1]
 
 
+def test_list_filter_values_discovers_gpu_model_names() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT count() AS total_count FROM ( SELECT DISTINCT usage.gpu_model_name AS value",
+                FakeQueryResult([(1,)], ["total_count"]),
+            ),
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+            (
+                "SELECT DISTINCT usage.gpu_model_name AS value",
+                FakeQueryResult(
+                    [("NVIDIA A100-SXM4-40GB",)],
+                    ["value"],
+                ),
+            ),
+        ]
+    )
+
+    result = list_filter_values(
+        client,
+        dimension="gpu_model_name",
+        resource="gpu",
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["values"] == ["NVIDIA A100-SXM4-40GB"]
+    assert "usage.resource IN ('gpu')" in client.queries[-1]
+
+
 def test_list_llm_filter_values_returns_distinct_values() -> None:
     client = PatternClient(
         [
@@ -431,6 +489,33 @@ def test_top_resource_consumers_normalizes_resource_alias_to_canonical_value() -
     assert result["rows"][0]["unit"] == "gpu_hours"
 
 
+def test_top_resource_consumers_can_rank_gpu_model_regex() -> None:
+    client = PatternClient(
+        [
+            (
+                "usage.resource IN ('gpu') AND match(usage.gpu_model_name, '(?i)A100')",
+                FakeQueryResult(
+                    [("demo-ns", "gpu_hours", Decimal("17.250000"))],
+                    ["namespace", "unit", "usage"],
+                ),
+            ),
+        ]
+    )
+
+    result = top_resource_consumers(
+        client,
+        dimension="namespace",
+        resource="gpu",
+        gpu_model_regex="(?i)A100",
+        start_date="2026-04-20",
+        end_date="2026-04-21",
+        settings=TEST_SETTINGS,
+    )
+
+    assert result["gpu_model_regex"] == "(?i)A100"
+    assert result["rows"][0]["namespace"] == "demo-ns"
+
+
 def test_get_usage_timeseries_defaults_to_last_30_days() -> None:
     client = PatternClient(
         [
@@ -469,13 +554,25 @@ def test_get_namespace_summary_groups_by_resource() -> None:
     client = PatternClient(
         [
             (
-                "GROUP BY usage.resource, usage.unit",
+                "GROUP BY usage.resource, usage.raw_resource, usage.gpu_model_name, usage.unit",
                 FakeQueryResult(
                     [
-                        ("gpu", "gpu_hours", Decimal("12.500000")),
-                        ("cpu", "cpu_core_hours", Decimal("100.000000")),
+                        (
+                            "gpu",
+                            "nvidia_com_gpu",
+                            "NVIDIA A100-SXM4-40GB",
+                            "gpu_hours",
+                            Decimal("12.500000"),
+                        ),
+                        (
+                            "cpu",
+                            "cpu",
+                            "not_applicable",
+                            "cpu_core_hours",
+                            Decimal("100.000000"),
+                        ),
                     ],
-                    ["resource", "unit", "usage"],
+                    ["resource", "raw_resource", "gpu_model_name", "unit", "usage"],
                 ),
             ),
         ]
@@ -492,6 +589,7 @@ def test_get_namespace_summary_groups_by_resource() -> None:
     assert result["namespace"] == "demo-ns"
     assert result["row_count"] == 2
     assert result["rows"][0]["resource"] == "gpu"
+    assert result["rows"][0]["gpu_model_name"] == "NVIDIA A100-SXM4-40GB"
 
 
 def test_get_namespace_llm_summary_groups_by_token_dimensions() -> None:
@@ -586,24 +684,56 @@ def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
                 ),
             ),
             (
-                "WHERE usage.date >= toDate('2026-04-21') AND usage.date <= toDate('2026-04-21') AND usage.namespace IN ('demo-ns') GROUP BY usage.resource, usage.unit",
+                "WHERE usage.date >= toDate('2026-04-21') AND usage.date <= toDate('2026-04-21') AND usage.namespace IN ('demo-ns') GROUP BY usage.resource, usage.raw_resource, usage.gpu_model_name, usage.unit",
                 FakeQueryResult(
                     [
-                        ("gpu", "gpu_hours", Decimal("12.500000")),
-                        ("cpu", "cpu_core_hours", Decimal("100.000000")),
-                        ("llm", "tokens", Decimal("1500.000000")),
+                        (
+                            "gpu",
+                            "nvidia_com_gpu",
+                            "NVIDIA A100-SXM4-40GB",
+                            "gpu_hours",
+                            Decimal("12.500000"),
+                        ),
+                        (
+                            "cpu",
+                            "cpu",
+                            "not_applicable",
+                            "cpu_core_hours",
+                            Decimal("100.000000"),
+                        ),
+                        (
+                            "llm",
+                            "llm",
+                            "not_applicable",
+                            "tokens",
+                            Decimal("1500.000000"),
+                        ),
                     ],
-                    ["resource", "unit", "usage"],
+                    ["resource", "raw_resource", "gpu_model_name", "unit", "usage"],
                 ),
             ),
             (
-                "WHERE usage.date >= toDate('2026-03-23') AND usage.date <= toDate('2026-04-21') AND usage.namespace IN ('demo-ns') GROUP BY usage.date, usage.resource, usage.unit",
+                "WHERE usage.date >= toDate('2026-03-23') AND usage.date <= toDate('2026-04-21') AND usage.namespace IN ('demo-ns') GROUP BY usage.date, usage.resource, usage.raw_resource, usage.gpu_model_name, usage.unit",
                 FakeQueryResult(
                     [
-                        (date(2026, 4, 20), "gpu", "gpu_hours", Decimal("5.000000")),
-                        (date(2026, 4, 21), "gpu", "gpu_hours", Decimal("7.500000")),
+                        (
+                            date(2026, 4, 20),
+                            "gpu",
+                            "nvidia_com_gpu",
+                            "NVIDIA A100-SXM4-40GB",
+                            "gpu_hours",
+                            Decimal("5.000000"),
+                        ),
+                        (
+                            date(2026, 4, 21),
+                            "gpu",
+                            "nvidia_com_gpu",
+                            "NVIDIA A100-SXM4-40GB",
+                            "gpu_hours",
+                            Decimal("7.500000"),
+                        ),
                     ],
-                    ["date", "resource", "unit", "usage"],
+                    ["date", "resource", "raw_resource", "gpu_model_name", "unit", "usage"],
                 ),
             ),
             (

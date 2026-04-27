@@ -80,6 +80,8 @@ mcp = _FastMCP(
         "LLM token usage breakdowns. Resource arguments use canonical names like gpu, cpu, memory, "
         "storage, fpga, network, and llm. "
         "Common aliases like gpu_hours, gpu-hours, GPU hours, and cpu_core_hours are normalized automatically. "
+        "For GPU model questions, pair resource='gpu' with gpu_model_name or gpu_model_regex; "
+        "for example, A100 prompts should use gpu_model_regex='(?i)A100'. "
         "Use query_resource_usage for custom infrastructure aggregations and query_llm_token_usage "
         "for custom LLM token aggregations."
     ),
@@ -102,6 +104,9 @@ def query_resource_usage(
     node_regex: str | None = None,
     node_institution: str | list[str] | None = None,
     resource: str | list[str] | None = None,
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
     granularity: str = "namespace",
     group_by: list[str] | None = None,
     limit: int = 500,
@@ -125,8 +130,14 @@ def query_resource_usage(
     - node_institution
     - created_by
     - resource
+    - raw_resource
+    - gpu_model_name
     - unit
     - pod_name (only with granularity='pod')
+
+    GPU model filters should normally be paired with resource='gpu'. For example,
+    "largest users of A100 GPUs" maps to top_resource_consumers(
+    dimension='namespace', resource='gpu', gpu_model_regex='(?i)A100').
     """
     app_context = ctx.request_context.lifespan_context
     return run_resource_usage_query(
@@ -140,6 +151,9 @@ def query_resource_usage(
         node_regex=node_regex,
         node_institution=node_institution,
         resource=resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         group_by=group_by,
         limit=limit,
         settings=app_context.settings,
@@ -173,6 +187,9 @@ def list_filter_values(
     node_regex: str | None = None,
     node_institution: str | list[str] | None = None,
     resource: str | list[str] | None = None,
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
     prefix: str | None = None,
     regex: str | None = None,
     limit: int = 100,
@@ -182,6 +199,7 @@ def list_filter_values(
     This is not a static catalog lookup. The returned values come from actual usage rows that match
     the requested filters and date window. If start_date and end_date are omitted, the tool defaults
     to the latest ingested day. Check is_truncated and total_count when you need a complete list.
+    Use dimension='gpu_model_name' with resource='gpu' to discover GPU model values.
     """
     app_context = ctx.request_context.lifespan_context
     return run_list_filter_values(
@@ -196,6 +214,9 @@ def list_filter_values(
         node_regex=node_regex,
         node_institution=node_institution,
         resource=resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         prefix=prefix,
         regex=regex,
         limit=limit,
@@ -273,6 +294,9 @@ def list_active_namespaces(
     node_regex: str | None = None,
     node_institution: str | list[str] | None = None,
     resource: str | list[str] | None = None,
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
     prefix: str | None = None,
     regex: str | None = None,
     limit: int = 5000,
@@ -293,6 +317,9 @@ def list_active_namespaces(
         node_regex=node_regex,
         node_institution=node_institution,
         resource=resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         prefix=prefix,
         regex=regex,
         limit=limit,
@@ -313,6 +340,9 @@ def top_resource_consumers(
     node: str | list[str] | None = None,
     node_regex: str | None = None,
     node_institution: str | list[str] | None = None,
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
     limit: int = 10,
 ) -> dict[str, object]:
     """Rank the top namespaces, institutions, or nodes for a specific resource.
@@ -320,6 +350,8 @@ def top_resource_consumers(
     Use canonical resource names like gpu, cpu, or llm. For example, use resource='llm' for
     namespace token rankings. Common aliases such as gpu_hours, gpu-hours, GPU hours,
     cpu_core_hours, and llm_tokens are accepted and normalized automatically.
+    For GPU model questions, pair resource='gpu' with gpu_model_name or gpu_model_regex.
+    Example: top_resource_consumers(dimension='namespace', resource='gpu', gpu_model_regex='(?i)A100').
     """
     app_context = ctx.request_context.lifespan_context
     return run_top_resource_consumers(
@@ -334,6 +366,9 @@ def top_resource_consumers(
         node=node,
         node_regex=node_regex,
         node_institution=node_institution,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         limit=limit,
         settings=app_context.settings,
     )
@@ -348,13 +383,16 @@ def get_usage_timeseries(
     start_date: str | None = None,
     end_date: str | None = None,
     granularity: str = "namespace",
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
     limit: int = 366,
 ) -> dict[str, object]:
     """Get a daily usage trend for one namespace, institution, node, or node-institution value.
 
     Resource inputs use canonical names like gpu, cpu, or llm. For example, use resource='llm' for
     namespace token trends. Common aliases such as gpu_hours, cpu_core_hours, and llm_tokens are
-    accepted and normalized automatically.
+    accepted and normalized automatically. Pair GPU model filters with resource='gpu'.
     """
     app_context = ctx.request_context.lifespan_context
     return run_get_usage_timeseries(
@@ -365,6 +403,9 @@ def get_usage_timeseries(
         start_date=start_date,
         end_date=end_date,
         granularity=granularity,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         limit=limit,
         settings=app_context.settings,
     )
@@ -377,11 +418,15 @@ def get_namespace_summary(
     start_date: str | None = None,
     end_date: str | None = None,
     resource: str | None = None,
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
 ) -> dict[str, object]:
     """Get a namespace summary grouped by resource and unit.
 
     If resource is provided, use a canonical resource name like gpu, cpu, or llm. Common aliases
     such as gpu_hours, cpu_core_hours, and llm_tokens are accepted and normalized automatically.
+    Pair GPU model filters with resource='gpu'.
     """
     app_context = ctx.request_context.lifespan_context
     return run_get_namespace_summary(
@@ -390,6 +435,9 @@ def get_namespace_summary(
         start_date=start_date,
         end_date=end_date,
         resource=resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         settings=app_context.settings,
     )
 
@@ -425,11 +473,15 @@ def get_namespace_daily_trend(
     resource: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
 ) -> dict[str, object]:
     """Get a namespace's daily trend, defaulting to the last 30 days when no dates are supplied.
 
     If resource is provided, use a canonical resource name like gpu, cpu, or llm. Common aliases
     such as gpu_hours, cpu_core_hours, and llm_tokens are accepted and normalized automatically.
+    Pair GPU model filters with resource='gpu'.
     """
     app_context = ctx.request_context.lifespan_context
     return run_get_namespace_daily_trend(
@@ -438,6 +490,9 @@ def get_namespace_daily_trend(
         resource=resource,
         start_date=start_date,
         end_date=end_date,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         settings=app_context.settings,
     )
 
@@ -473,12 +528,16 @@ def top_nodes_for_namespace(
     resource: str,
     start_date: str | None = None,
     end_date: str | None = None,
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
     limit: int = 10,
 ) -> dict[str, object]:
     """Rank the highest-usage nodes for one namespace and one resource.
 
     Use canonical resource names like gpu, cpu, or llm. Common aliases such as gpu_hours,
     gpu-hours, GPU hours, cpu_core_hours, and llm_tokens are accepted and normalized automatically.
+    Pair GPU model filters with resource='gpu'.
     """
     app_context = ctx.request_context.lifespan_context
     return run_top_nodes_for_namespace(
@@ -487,6 +546,9 @@ def top_nodes_for_namespace(
         resource=resource,
         start_date=start_date,
         end_date=end_date,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         limit=limit,
         settings=app_context.settings,
     )
@@ -499,6 +561,9 @@ def get_namespace_details(
     trend_days: int = 30,
     top_node_limit: int = 10,
     top_nodes_resource: str | None = None,
+    raw_resource: str | list[str] | None = None,
+    gpu_model_name: str | list[str] | None = None,
+    gpu_model_regex: str | None = None,
 ) -> dict[str, object]:
     """Get namespace metadata, latest summary, recent trend, and top nodes by resource."""
     app_context = ctx.request_context.lifespan_context
@@ -508,6 +573,9 @@ def get_namespace_details(
         trend_days=trend_days,
         top_node_limit=top_node_limit,
         top_nodes_resource=top_nodes_resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         settings=app_context.settings,
     )
 

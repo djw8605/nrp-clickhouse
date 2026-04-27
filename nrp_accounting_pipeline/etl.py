@@ -9,10 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from .aggregation import (
+    GPU_MODEL_MIXED,
+    GPU_MODEL_NOT_APPLICABLE,
+    GPU_MODEL_UNKNOWN,
     aggregate_daily_metrics,
     aggregate_llm_namespace_usage,
     aggregate_llm_token_usage,
     aggregate_namespace_usage,
+    gpu_model_from_raw_resource,
+    normalize_resource,
+    should_ignore_resource,
 )
 from .config import Settings, get_settings
 from .institution_import import download_and_import_institutions
@@ -30,6 +36,9 @@ POD_RESOURCE_REQUESTS_QUERY_TEMPLATE = (
 )
 POD_ANNOTATIONS_QUERY_TEMPLATE = (
     "max_over_time(kube_pod_annotations[1d:5m]@{end_ts})"
+)
+GPU_MODEL_QUERY_TEMPLATE = (
+    'max_over_time(DCGM_FI_DEV_GPU_UTIL{modelName!=""}[1d:5m]@{end_ts})'
 )
 LLM_TOKEN_USAGE_QUERY_TEMPLATE = (
     "sum(increase(gen_ai_client_token_usage_sum[1d]@{end_ts})) "
@@ -109,6 +118,114 @@ def attach_pod_annotations_to_resource_payload(
     return enriched_payload
 
 
+def _resolve_mixed_value(values: set[str]) -> str:
+    if not values:
+        return GPU_MODEL_UNKNOWN
+    if len(values) == 1:
+        return next(iter(values))
+    return GPU_MODEL_MIXED
+
+
+def _build_gpu_model_lookup(
+    dcgm_payload: dict[str, Any],
+) -> tuple[dict[tuple[str, str, str], str], dict[str, str]]:
+    pod_container_models: dict[tuple[str, str, str], set[str]] = {}
+    host_models: dict[str, set[str]] = {}
+
+    for series in dcgm_payload.get("data", {}).get("result", []):
+        labels = series.get("metric", {}) or {}
+        model_name = str(labels.get("modelName") or "").strip()
+        if not model_name:
+            continue
+
+        hostname = str(labels.get("Hostname") or labels.get("hostname") or "").strip()
+        if hostname:
+            host_models.setdefault(hostname, set()).add(model_name)
+
+        namespace = str(labels.get("namespace") or "").strip()
+        pod = str(labels.get("pod") or "").strip()
+        container = str(labels.get("container") or "").strip()
+        if not namespace or not pod or not container:
+            continue
+        if namespace == "gpu-operator" or container == "nvidia-dcgm-exporter":
+            continue
+
+        pod_container_models.setdefault((namespace, pod, container), set()).add(model_name)
+
+    by_pod_container = {
+        key: _resolve_mixed_value(models)
+        for key, models in pod_container_models.items()
+    }
+    by_host = {
+        hostname: next(iter(models))
+        for hostname, models in host_models.items()
+        if len(models) == 1
+    }
+    return by_pod_container, by_host
+
+
+def _node_label(labels: dict[str, Any]) -> str:
+    node = (
+        labels.get("node")
+        or labels.get("kubernetes_node")
+        or labels.get("node_name")
+        or labels.get("kubernetes_io_hostname")
+    )
+    if node:
+        return str(node)
+
+    instance = labels.get("instance")
+    if instance:
+        instance_str = str(instance)
+        if ":" in instance_str:
+            return instance_str.split(":", 1)[0]
+        return instance_str
+
+    return ""
+
+
+def attach_gpu_model_names_to_resource_payload(
+    resource_payload: dict[str, Any],
+    dcgm_payload: dict[str, Any],
+) -> dict[str, Any]:
+    model_by_pod_container, model_by_host = _build_gpu_model_lookup(dcgm_payload)
+    data = resource_payload.get("data", {})
+    result = data.get("result", [])
+    enriched_result: list[dict[str, Any]] = []
+
+    for series in result:
+        enriched_series = dict(series)
+        labels = dict(series.get("metric", {}) or {})
+        raw_resource = str(labels.get("resource") or "")
+
+        if should_ignore_resource(raw_resource) or normalize_resource(raw_resource) != "gpu":
+            labels["gpu_model_name"] = GPU_MODEL_NOT_APPLICABLE
+            enriched_series["metric"] = labels
+            enriched_result.append(enriched_series)
+            continue
+
+        namespace = str(labels.get("namespace") or "").strip()
+        pod = str(labels.get("pod") or "").strip()
+        container = str(labels.get("container") or "").strip()
+        node = _node_label(labels)
+
+        gpu_model_name = (
+            model_by_pod_container.get((namespace, pod, container))
+            or model_by_host.get(node)
+            or gpu_model_from_raw_resource(raw_resource)
+            or GPU_MODEL_UNKNOWN
+        )
+        labels["gpu_model_name"] = gpu_model_name
+        enriched_series["metric"] = labels
+        enriched_result.append(enriched_series)
+
+    enriched_data = dict(data)
+    enriched_data["result"] = enriched_result
+    enriched_payload = dict(resource_payload)
+    enriched_payload["data"] = enriched_data
+    return enriched_payload
+
+
 def _query_allocated_resources(
     *,
     end_ts: datetime,
@@ -133,6 +250,25 @@ def _query_allocated_resources(
     enriched_payload = attach_pod_annotations_to_resource_payload(
         resource_payload,
         annotations_payload,
+    )
+    gpu_model_query = GPU_MODEL_QUERY_TEMPLATE.format(end_ts=end_timestamp)
+    try:
+        dcgm_payload = query_prometheus(
+            gpu_model_query,
+            settings=settings,
+            timeout_seconds=settings.PROMETHEUS_TIMEOUT_SECONDS,
+            retry_limit=settings.RETRY_LIMIT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "etl_gpu_model_query_failed",
+            extra={"error": str(exc)},
+        )
+        dcgm_payload = {"data": {"result": []}}
+
+    enriched_payload = attach_gpu_model_names_to_resource_payload(
+        enriched_payload,
+        dcgm_payload,
     )
     return {POD_RESOURCE_METRIC_NAME: enriched_payload}
 

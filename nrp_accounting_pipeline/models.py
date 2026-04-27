@@ -23,6 +23,8 @@ class PodUsageRecord:
     pod_uid: str
     pod_name: str
     resource: str
+    raw_resource: str
+    gpu_model_name: str
     usage: Decimal
     unit: str
 
@@ -36,6 +38,8 @@ class PodUsageRecord:
             self.pod_uid,
             self.pod_name,
             self.resource,
+            self.raw_resource,
+            self.gpu_model_name,
             self.usage,
             self.unit,
         )
@@ -50,6 +54,8 @@ class PodUsageRecord:
             "pod_uid": self.pod_uid,
             "pod_name": self.pod_name,
             "resource": self.resource,
+            "raw_resource": self.raw_resource,
+            "gpu_model_name": self.gpu_model_name,
             "usage": float(self.usage),
             "unit": self.unit,
         }
@@ -62,6 +68,8 @@ class NamespaceUsageRecord:
     created_by: str
     node: str
     resource: str
+    raw_resource: str
+    gpu_model_name: str
     usage: Decimal
     unit: str
 
@@ -72,6 +80,8 @@ class NamespaceUsageRecord:
             self.created_by,
             self.node,
             self.resource,
+            self.raw_resource,
+            self.gpu_model_name,
             self.usage,
             self.unit,
         )
@@ -83,6 +93,8 @@ class NamespaceUsageRecord:
             "created_by": self.created_by,
             "node": self.node,
             "resource": self.resource,
+            "raw_resource": self.raw_resource,
+            "gpu_model_name": self.gpu_model_name,
             "usage": float(self.usage),
             "unit": self.unit,
         }

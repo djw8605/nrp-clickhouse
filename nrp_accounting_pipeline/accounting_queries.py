@@ -101,6 +101,8 @@ _GROUPABLE_EXPRESSIONS: dict[str, str] = {
     "created_by": "usage.created_by",
     "node": "usage.node",
     "resource": "usage.resource",
+    "raw_resource": "usage.raw_resource",
+    "gpu_model_name": "usage.gpu_model_name",
     "unit": "usage.unit",
     "institution": "coalesce(meta.institution, 'Unknown')",
     "pi": "coalesce(meta.pi, 'Unknown')",
@@ -113,6 +115,8 @@ _LISTABLE_DIMENSIONS = {
     "institution": _GROUPABLE_EXPRESSIONS["institution"],
     "node": _GROUPABLE_EXPRESSIONS["node"],
     "resource": _GROUPABLE_EXPRESSIONS["resource"],
+    "raw_resource": _GROUPABLE_EXPRESSIONS["raw_resource"],
+    "gpu_model_name": _GROUPABLE_EXPRESSIONS["gpu_model_name"],
     "pi": _GROUPABLE_EXPRESSIONS["pi"],
     "node_institution": _GROUPABLE_EXPRESSIONS["node_institution"],
     "pod_name": _GROUPABLE_EXPRESSIONS["pod_name"],
@@ -579,10 +583,15 @@ def _build_usage_where_clauses(
     node_regex: str | None = None,
     node_institution_filters: Sequence[str] = (),
     resource_filters: Sequence[str] = (),
+    raw_resource_filters: Sequence[str] = (),
+    gpu_model_name_filters: Sequence[str] = (),
+    gpu_model_regex: str | None = None,
     extra_clauses: Sequence[str] = (),
 ) -> list[str]:
     if node_regex:
         re.compile(node_regex)
+    if gpu_model_regex:
+        re.compile(gpu_model_regex)
 
     clauses = [
         f"usage.date >= toDate('{start_day.isoformat()}')",
@@ -601,9 +610,17 @@ def _build_usage_where_clauses(
         values=node_institution_filters,
     )
     _maybe_add_in_filter(clauses, expression="usage.resource", values=resource_filters)
+    _maybe_add_in_filter(clauses, expression="usage.raw_resource", values=raw_resource_filters)
+    _maybe_add_in_filter(
+        clauses,
+        expression="usage.gpu_model_name",
+        values=gpu_model_name_filters,
+    )
 
     if node_regex:
         clauses.append(f"match(usage.node, {_sql_string_literal(node_regex)})")
+    if gpu_model_regex:
+        clauses.append(f"match(usage.gpu_model_name, {_sql_string_literal(gpu_model_regex)})")
 
     clauses.extend(extra_clauses)
     return clauses
@@ -669,6 +686,9 @@ def build_resource_usage_query(
     node_regex: str | None = None,
     node_institution: str | Sequence[str] | None = None,
     resource: str | Sequence[str] | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     group_by: Sequence[str] | None = None,
     limit: int | None = None,
     settings: Settings | None = None,
@@ -690,6 +710,8 @@ def build_resource_usage_query(
     node_filters = _normalize_string_list(node)
     node_institution_filters = _normalize_string_list(node_institution)
     resource_filters = _normalize_resource_list(resource)
+    raw_resource_filters = _normalize_string_list(raw_resource)
+    gpu_model_name_filters = _normalize_string_list(gpu_model_name)
 
     _validate_resource_safety(normalized_group_by, resource_filters)
 
@@ -706,6 +728,9 @@ def build_resource_usage_query(
         node_regex=node_regex,
         node_institution_filters=node_institution_filters,
         resource_filters=resource_filters,
+        raw_resource_filters=raw_resource_filters,
+        gpu_model_name_filters=gpu_model_name_filters,
+        gpu_model_regex=gpu_model_regex,
     )
 
     select_expressions = [
@@ -755,6 +780,9 @@ def query_resource_usage(
     node_regex: str | None = None,
     node_institution: str | Sequence[str] | None = None,
     resource: str | Sequence[str] | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     group_by: Sequence[str] | None = None,
     limit: int | None = None,
     settings: Settings | None = None,
@@ -770,6 +798,9 @@ def query_resource_usage(
         node_regex=node_regex,
         node_institution=node_institution,
         resource=resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         group_by=group_by,
         limit=limit,
         settings=settings,
@@ -921,6 +952,9 @@ def list_filter_values(
     node_regex: str | None = None,
     node_institution: str | Sequence[str] | None = None,
     resource: str | Sequence[str] | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     prefix: str | None = None,
     regex: str | None = None,
     limit: int | None = None,
@@ -938,6 +972,9 @@ def list_filter_values(
         node_regex=node_regex,
         node_institution=node_institution,
         resource=resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         prefix=prefix,
         regex=regex,
         limit=limit,
@@ -1042,6 +1079,9 @@ def _list_distinct_dimension_values(
     node_regex: str | None = None,
     node_institution: str | Sequence[str] | None = None,
     resource: str | Sequence[str] | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     prefix: str | None = None,
     regex: str | None = None,
     limit: int | None = None,
@@ -1099,6 +1139,9 @@ def _list_distinct_dimension_values(
         node_regex=node_regex,
         node_institution_filters=_normalize_string_list(node_institution),
         resource_filters=_normalize_resource_list(resource),
+        raw_resource_filters=_normalize_string_list(raw_resource),
+        gpu_model_name_filters=_normalize_string_list(gpu_model_name),
+        gpu_model_regex=gpu_model_regex,
         extra_clauses=extra_clauses,
     )
 
@@ -1152,6 +1195,9 @@ def list_active_namespaces(
     node_regex: str | None = None,
     node_institution: str | Sequence[str] | None = None,
     resource: str | Sequence[str] | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     prefix: str | None = None,
     regex: str | None = None,
     limit: int | None = None,
@@ -1168,6 +1214,9 @@ def list_active_namespaces(
         node_regex=node_regex,
         node_institution=node_institution,
         resource=resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         prefix=prefix,
         regex=regex,
         limit=limit,
@@ -1201,6 +1250,9 @@ def top_resource_consumers(
     node: str | Sequence[str] | None = None,
     node_regex: str | None = None,
     node_institution: str | Sequence[str] | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     limit: int | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
@@ -1235,6 +1287,9 @@ def top_resource_consumers(
         node_regex=node_regex,
         node_institution_filters=_normalize_string_list(node_institution),
         resource_filters=[safe_resource],
+        raw_resource_filters=_normalize_string_list(raw_resource),
+        gpu_model_name_filters=_normalize_string_list(gpu_model_name),
+        gpu_model_regex=gpu_model_regex,
         extra_clauses=[f"notEmpty(toString({dimension_expression}))"],
     )
 
@@ -1256,6 +1311,9 @@ LIMIT {safe_limit}
     return {
         "dimension": safe_dimension,
         "resource": safe_resource,
+        "raw_resource": _normalize_string_list(raw_resource),
+        "gpu_model_name": _normalize_string_list(gpu_model_name),
+        "gpu_model_regex": gpu_model_regex,
         "granularity": safe_granularity,
         "start_date": start_day.isoformat(),
         "end_date": end_day.isoformat(),
@@ -1274,6 +1332,9 @@ def get_usage_timeseries(
     start_date: date | datetime | str | None = None,
     end_date: date | datetime | str | None = None,
     granularity: str = "namespace",
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     limit: int | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
@@ -1304,6 +1365,9 @@ def get_usage_timeseries(
         start_day=start_day,
         end_day=end_day,
         resource_filters=[safe_resource],
+        raw_resource_filters=_normalize_string_list(raw_resource),
+        gpu_model_name_filters=_normalize_string_list(gpu_model_name),
+        gpu_model_regex=gpu_model_regex,
         extra_clauses=[f"{dimension_expression} = {_sql_string_literal(value)}"],
     )
 
@@ -1326,6 +1390,9 @@ LIMIT {safe_limit}
         "dimension": safe_dimension,
         "value": value,
         "resource": safe_resource,
+        "raw_resource": _normalize_string_list(raw_resource),
+        "gpu_model_name": _normalize_string_list(gpu_model_name),
+        "gpu_model_regex": gpu_model_regex,
         "granularity": safe_granularity,
         "start_date": start_day.isoformat(),
         "end_date": end_day.isoformat(),
@@ -1342,6 +1409,9 @@ def get_namespace_summary(
     start_date: date | datetime | str | None = None,
     end_date: date | datetime | str | None = None,
     resource: str | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     result = query_resource_usage(
@@ -1351,7 +1421,10 @@ def get_namespace_summary(
         end_date=end_date,
         namespace=namespace,
         resource=resource,
-        group_by=["resource", "unit"],
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
+        group_by=["resource", "raw_resource", "gpu_model_name", "unit"],
         limit=100,
         settings=settings,
     )
@@ -1371,6 +1444,9 @@ def get_namespace_daily_trend(
     resource: str | None = None,
     start_date: date | datetime | str | None = None,
     end_date: date | datetime | str | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     active_settings = settings or get_settings()
@@ -1382,7 +1458,11 @@ def get_namespace_daily_trend(
         end_date=end_date,
         default_days=DEFAULT_TREND_DAYS,
     )
-    group_by = ["date", "unit"] if resource else ["date", "resource", "unit"]
+    group_by = (
+        ["date", "raw_resource", "gpu_model_name", "unit"]
+        if resource
+        else ["date", "resource", "raw_resource", "gpu_model_name", "unit"]
+    )
     result = query_resource_usage(
         client,
         granularity="namespace",
@@ -1390,6 +1470,9 @@ def get_namespace_daily_trend(
         end_date=end_day,
         namespace=namespace,
         resource=resource,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         group_by=group_by,
         limit=DEFAULT_RESULT_LIMIT,
         settings=active_settings,
@@ -1399,6 +1482,8 @@ def get_namespace_daily_trend(
         key=lambda row: (
             row["date"],
             str(row.get("resource", "")),
+            str(row.get("raw_resource", "")),
+            str(row.get("gpu_model_name", "")),
             str(row.get("unit", "")),
         ),
     )
@@ -1495,6 +1580,9 @@ def top_nodes_for_namespace(
     resource: str,
     start_date: date | datetime | str | None = None,
     end_date: date | datetime | str | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     limit: int | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
@@ -1506,12 +1594,18 @@ def top_nodes_for_namespace(
         end_date=end_date,
         granularity="namespace",
         namespace=namespace,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         limit=limit,
         settings=settings,
     )
     return {
         "namespace": namespace,
         "resource": resource,
+        "raw_resource": _normalize_string_list(raw_resource),
+        "gpu_model_name": _normalize_string_list(gpu_model_name),
+        "gpu_model_regex": gpu_model_regex,
         "start_date": result["start_date"],
         "end_date": result["end_date"],
         "limit": result["limit"],
@@ -1553,6 +1647,9 @@ def get_namespace_details(
     trend_days: int = DEFAULT_TREND_DAYS,
     top_node_limit: int = DEFAULT_TOP_LIMIT,
     top_nodes_resource: str | None = None,
+    raw_resource: str | Sequence[str] | None = None,
+    gpu_model_name: str | Sequence[str] | None = None,
+    gpu_model_regex: str | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     active_settings = settings or get_settings()
@@ -1572,6 +1669,9 @@ def get_namespace_details(
         namespace=namespace,
         start_date=latest_date,
         end_date=latest_date,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         settings=active_settings,
     )
     daily_trend = get_namespace_daily_trend(
@@ -1579,6 +1679,9 @@ def get_namespace_details(
         namespace=namespace,
         start_date=trend_start,
         end_date=latest_date,
+        raw_resource=raw_resource,
+        gpu_model_name=gpu_model_name,
+        gpu_model_regex=gpu_model_regex,
         settings=active_settings,
     )
 
@@ -1602,6 +1705,9 @@ def get_namespace_details(
             resource=resource_name,
             start_date=latest_date,
             end_date=latest_date,
+            raw_resource=raw_resource,
+            gpu_model_name=gpu_model_name,
+            gpu_model_regex=gpu_model_regex,
             limit=top_node_limit,
             settings=active_settings,
         )

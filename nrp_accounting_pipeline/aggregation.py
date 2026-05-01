@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from collections import defaultdict
 from datetime import date
 from typing import Any, Iterable, Mapping
@@ -41,6 +42,8 @@ GPU_MODEL_UNKNOWN = "unknown"
 GPU_MODEL_MIXED = "mixed"
 GPU_MODEL_NOT_APPLICABLE = "not_applicable"
 GPU_RAW_RESOURCE = "gpu"
+DECIMAL64_SCALE = 6
+DECIMAL64_MAX_ABS = ((2**63) - 1) / (10**DECIMAL64_SCALE)
 
 try:
     import cityhash  # type: ignore
@@ -147,9 +150,12 @@ def _extract_node_label(labels: Mapping[str, Any]) -> str:
 
 def _parse_sample_value(raw_value: Any) -> float | None:
     try:
-        return float(raw_value)
+        parsed = float(raw_value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
 
 
 def _extract_sample_points(series: Mapping[str, Any]) -> list[tuple[float, float]]:
@@ -268,6 +274,10 @@ def _series_usage_for_metric(metric_name: str, resource_name: str, points: list[
     return sum(value for _, value in points)
 
 
+def _usage_fits_clickhouse_decimal(value: float) -> bool:
+    return math.isfinite(value) and abs(value) <= DECIMAL64_MAX_ABS
+
+
 def aggregate_daily_metrics(
     results: Mapping[str, Mapping[str, Any]],
     target_date: date,
@@ -327,33 +337,49 @@ def aggregate_daily_metrics(
             )
             aggregated[key] += usage_value
 
-    pod_rows = [
-        PodUsageRecord(
-            date=target_date,
-            namespace=namespace,
-            created_by=created_by,
-            node=node,
-            pod_hash=compute_pod_hash(pod_name),
-            pod_uid=pod_uid,
-            pod_name=pod_name,
-            resource=resource,
-            raw_resource=raw_resource,
-            gpu_model_name=gpu_model_name,
-            usage=quantize_usage(usage),
-            unit=unit,
+    pod_rows: list[PodUsageRecord] = []
+    for (
+        namespace,
+        created_by,
+        node,
+        pod_name,
+        pod_uid,
+        resource,
+        raw_resource,
+        gpu_model_name,
+        unit,
+    ), usage in aggregated.items():
+        if not _usage_fits_clickhouse_decimal(usage):
+            logger.warning(
+                "aggregation_skip_out_of_range_pod_usage",
+                extra={
+                    "date": target_date.isoformat(),
+                    "namespace": namespace,
+                    "pod_name": pod_name,
+                    "pod_uid": pod_uid,
+                    "resource": resource,
+                    "raw_resource": raw_resource,
+                    "usage": usage,
+                },
+            )
+            continue
+
+        pod_rows.append(
+            PodUsageRecord(
+                date=target_date,
+                namespace=namespace,
+                created_by=created_by,
+                node=node,
+                pod_hash=compute_pod_hash(pod_name),
+                pod_uid=pod_uid,
+                pod_name=pod_name,
+                resource=resource,
+                raw_resource=raw_resource,
+                gpu_model_name=gpu_model_name,
+                usage=quantize_usage(usage),
+                unit=unit,
+            )
         )
-        for (
-            namespace,
-            created_by,
-            node,
-            pod_name,
-            pod_uid,
-            resource,
-            raw_resource,
-            gpu_model_name,
-            unit,
-        ), usage in aggregated.items()
-    ]
 
     pod_rows.sort(
         key=lambda row: (

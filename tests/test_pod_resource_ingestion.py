@@ -148,6 +148,70 @@ def test_aggregate_daily_metrics_ignores_extended_gpu_memory_resources() -> None
     assert rows[0].gpu_model_name == "unknown"
 
 
+def test_aggregate_daily_metrics_skips_non_finite_prometheus_samples() -> None:
+    payload = {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "namespace": "analytics",
+                        "pod": "trainer-0",
+                        "uid": "pod-uid-1",
+                        "node": "gpu-node-a",
+                        "resource": "cpu",
+                        "annotation_nrp_ai_username": "jane.doe",
+                    },
+                    "value": [1700007200, "NaN"],
+                },
+                {
+                    "metric": {
+                        "namespace": "analytics",
+                        "pod": "trainer-0",
+                        "uid": "pod-uid-1",
+                        "node": "gpu-node-a",
+                        "resource": "memory",
+                        "annotation_nrp_ai_username": "jane.doe",
+                    },
+                    "value": [1700007200, "Infinity"],
+                },
+            ]
+        }
+    }
+
+    rows = aggregate_daily_metrics(
+        {"kube_pod_container_resource_requests": payload},
+        target_date=date(2026, 4, 23),
+    )
+
+    assert rows == []
+
+
+def test_aggregate_daily_metrics_skips_out_of_range_usage_values() -> None:
+    payload = {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "namespace": "osg-opportunistic",
+                        "pod": "osg-direct-694335ec-02f064-lpg45",
+                        "uid": "3ca560b1-76d6-48aa-9c31-b5415132995c",
+                        "node": "gpu-node-a",
+                        "resource": "cpu",
+                    },
+                    "value": [1777602682.048, "270215977642229760"],
+                }
+            ]
+        }
+    }
+
+    rows = aggregate_daily_metrics(
+        {"kube_pod_container_resource_requests": payload},
+        target_date=date(2026, 2, 21),
+    )
+
+    assert rows == []
+
+
 def test_attach_gpu_model_names_to_resource_payload_matches_pod_container() -> None:
     resource_payload = {
         "data": {

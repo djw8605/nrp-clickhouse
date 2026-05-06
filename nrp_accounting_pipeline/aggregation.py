@@ -23,6 +23,8 @@ DEFAULT_DAY_SECONDS = 24 * 3600.0
 # (e.g. core-hours, gb-hours).
 SUBQUERY_STEP_MINUTES = 5
 SAMPLES_PER_HOUR = 60 / SUBQUERY_STEP_MINUTES
+SAMPLES_PER_DAY = 24 * SAMPLES_PER_HOUR
+MAX_REASONABLE_CPU_REQUEST_CORES = 1_000_000.0
 
 _RESOURCE_TO_UNIT = {
     "cpu": "cpu_core_hours",
@@ -89,7 +91,10 @@ def normalize_resource(resource_name: str) -> str:
 
 def should_ignore_resource(resource_name: str) -> bool:
     value = (resource_name or "").strip().lower()
-    return value != "memory" and value.endswith("_memory")
+    # Extended GPU memory resources are byte counts, not allocatable GPU counts.
+    return value != "memory" and (
+        value.endswith("_memory") or value.endswith("_mem")
+    )
 
 
 def gpu_model_from_raw_resource(resource_name: str) -> str | None:
@@ -274,6 +279,27 @@ def _series_usage_for_metric(metric_name: str, resource_name: str, points: list[
     return sum(value for _, value in points)
 
 
+def _series_samples_are_plausible(
+    metric_name: str,
+    resource_name: str,
+    points: list[tuple[float, float]],
+) -> bool:
+    normalized = normalize_resource(resource_name)
+    metric = metric_name.lower()
+
+    if normalized != "cpu":
+        return True
+
+    if (
+        "namespace_allocated_resources" not in metric
+        and "kube_pod_container_resource_requests" not in metric
+    ):
+        return True
+
+    max_sum_over_time_value = MAX_REASONABLE_CPU_REQUEST_CORES * SAMPLES_PER_DAY
+    return all(abs(value) <= max_sum_over_time_value for _, value in points)
+
+
 def _usage_fits_clickhouse_decimal(value: float) -> bool:
     return math.isfinite(value) and abs(value) <= DECIMAL64_MAX_ABS
 
@@ -320,6 +346,20 @@ def aggregate_daily_metrics(
                 logger.debug(
                     "aggregation_skip_empty_series",
                     extra={"metric": metric_name, "labels": labels},
+                )
+                continue
+
+            if not _series_samples_are_plausible(metric_name, raw_resource, points):
+                logger.warning(
+                    "aggregation_skip_implausible_cpu_sample",
+                    extra={
+                        "metric": metric_name,
+                        "resource": raw_resource,
+                        "labels": labels,
+                        "sample_values": [value for _, value in points],
+                        "max_sum_over_time_value": MAX_REASONABLE_CPU_REQUEST_CORES
+                        * SAMPLES_PER_DAY,
+                    },
                 )
                 continue
 

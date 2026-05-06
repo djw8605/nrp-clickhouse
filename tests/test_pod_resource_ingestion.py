@@ -134,6 +134,16 @@ def test_aggregate_daily_metrics_ignores_extended_gpu_memory_resources() -> None
                     },
                     "value": [1765584000, "68719476736"],
                 },
+                {
+                    "metric": {
+                        "namespace": "lemn-lab",
+                        "pod": "hongao-job-test-82jrc",
+                        "uid": "pod-uid-1",
+                        "node": "gpu-node-a",
+                        "resource": "nvidia_com_gpu_mem",
+                    },
+                    "value": [1765584000, "80000000000"],
+                },
             ]
         }
     }
@@ -210,6 +220,44 @@ def test_aggregate_daily_metrics_skips_out_of_range_usage_values() -> None:
     )
 
     assert rows == []
+
+
+def test_aggregate_daily_metrics_skips_implausible_cpu_request_samples() -> None:
+    payload = {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "namespace": "gp-engine-mizzou-matisziw",
+                        "pod": "airflow-webserver-5d6d5cf75b-gdzdt",
+                        "uid": "1350e235-1b4d-477b-ae03-8d89bb41a7d6",
+                        "node": "10.244.52.130",
+                        "resource": "cpu",
+                    },
+                    "value": [1746748800, "440234147840"],
+                },
+                {
+                    "metric": {
+                        "namespace": "gp-engine-mizzou-matisziw",
+                        "pod": "airflow-redis-0",
+                        "uid": "772fc955-d10e-4bc3-bb1b-080ffd8ba3f0",
+                        "node": "hcc-nrp-shor-c6021.unl.edu",
+                        "resource": "cpu",
+                    },
+                    "value": [1746748800, "1.2"],
+                },
+            ]
+        }
+    }
+
+    rows = aggregate_daily_metrics(
+        {"kube_pod_container_resource_requests": payload},
+        target_date=date(2025, 5, 8),
+    )
+
+    assert [(row.pod_name, row.usage) for row in rows] == [
+        ("airflow-redis-0", Decimal("0.100000"))
+    ]
 
 
 def test_attach_gpu_model_names_to_resource_payload_matches_pod_container() -> None:

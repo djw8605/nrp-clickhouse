@@ -1,0 +1,24 @@
+architecture: standalone
+auth:
+  existingSecret: aime-postgres-secret
+  username: nrp_aime
+  database: nrp_aime
+  secretKeys:
+    adminPasswordKey: postgres-password
+    userPasswordKey: APP_DB_PASSWORD
+primary:
+  persistence:
+    enabled: true
+    storageClass: linstor-ha
+    size: 50Gi
+    accessModes:
+      - ReadWriteOnce
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  service:
+    type: ClusterIP

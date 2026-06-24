@@ -1,0 +1,194 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-clickhouse
+spec:
+  schedule: "0 10 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 600
+          volumes:
+            - name: gcloud
+              secret:
+                secretName: backup-google-service-account
+          containers:
+            - name: backup
+              image: gitlab-registry.nrp-nautilus.io/nrp/clickhouse
+              imagePullPolicy: Always
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 512Mi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+              env:
+                - name: CH_USER
+                  value: aime
+                - name: CH_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-backup-credentials
+                      key: password
+              volumeMounts:
+                - name: gcloud
+                  mountPath: /gcloud
+              command:
+                - bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  mkdir -p /root/.config/rclone
+                  cat > /root/.config/rclone/rclone.conf <<RCLONE
+                  [gcs]
+                  type = google cloud storage
+                  service_account_file = /gcloud/key.json
+                  bucket_policy_only = true
+                  RCLONE
+
+                  BACKUP_DATE=$(date +%Y-%m-%d-%H%M)
+                  BACKUP_DIR="/tmp/ch-backup-${BACKUP_DATE}"
+                  ARCHIVE="/tmp/ch-backup-${BACKUP_DATE}.tar.gz"
+                  mkdir -p "${BACKUP_DIR}"
+                  CH_HOST="clickhouse-access-accounting.clickhouse.svc.cluster.local"
+
+                  chq() {
+                    clickhouse-client --host="${CH_HOST}" --port=9000 \
+                      --user="${CH_USER}" --password="${CH_PASSWORD}" \
+                      --query="$1"
+                  }
+                  chq_out() {
+                    clickhouse-client --host="${CH_HOST}" --port=9000 \
+                      --user="${CH_USER}" --password="${CH_PASSWORD}" \
+                      --query="$1" > "$2"
+                  }
+
+                  echo "==> Fetching databases..."
+                  chq "SELECT name FROM system.databases
+                    WHERE name NOT IN ('system','information_schema','INFORMATION_SCHEMA','_temporary_and_external_tables')
+                    FORMAT TSV" > /tmp/databases.txt
+
+                  while read -r DB; do
+                    echo "==> Database: ${DB}"
+                    mkdir -p "${BACKUP_DIR}/${DB}"
+
+                    chq_out "SHOW CREATE DATABASE \`${DB}\` FORMAT Raw" \
+                      "${BACKUP_DIR}/${DB}/create_database.sql"
+
+                    chq "SELECT name, engine FROM system.tables
+                      WHERE database = '${DB}' AND name NOT LIKE '.inner%'
+                      ORDER BY multiIf(engine LIKE 'MaterializedView', 2, engine = 'View', 3, 1), name
+                      FORMAT TSV" > /tmp/tables.txt
+
+                    while IFS=$'\t' read -r TABLE ENGINE; do
+                      echo "    DDL: ${TABLE} (${ENGINE})"
+                      chq_out "SHOW CREATE TABLE \`${DB}\`.\`${TABLE}\` FORMAT Raw" \
+                        "${BACKUP_DIR}/${DB}/${TABLE}.sql"
+                    done < /tmp/tables.txt
+
+                    while IFS=$'\t' read -r TABLE ENGINE; do
+                      if [[ "$ENGINE" == "View" || "$ENGINE" == "MaterializedView" ]]; then
+                        continue
+                      fi
+                      echo "    Data: ${TABLE}"
+                      chq_out "SELECT * FROM \`${DB}\`.\`${TABLE}\` FORMAT Native" \
+                        "${BACKUP_DIR}/${DB}/${TABLE}.native"
+                    done < /tmp/tables.txt
+
+                  done < /tmp/databases.txt
+
+                  echo "==> Dumping access control (best-effort)..."
+                  mkdir -p "${BACKUP_DIR}/_access"
+
+                  chq "SELECT 'SHOW CREATE USER ' || name || ';'
+                    FROM system.users WHERE name NOT IN ('default') FORMAT TSV" \
+                    2>/dev/null | while read -r CMD; do
+                      chq "${CMD}" >> "${BACKUP_DIR}/_access/users.sql" 2>/dev/null || true
+                    done || true
+
+                  chq "SELECT 'SHOW CREATE ROLE ' || name || ';'
+                    FROM system.roles FORMAT TSV" \
+                    2>/dev/null | while read -r CMD; do
+                      chq "${CMD}" >> "${BACKUP_DIR}/_access/roles.sql" 2>/dev/null || true
+                    done || true
+
+                  chq "SHOW GRANTS" > "${BACKUP_DIR}/_access/grants.sql" 2>/dev/null || true
+                  chq "SHOW CREATE QUOTA ALL" >> "${BACKUP_DIR}/_access/quotas.sql" 2>/dev/null || true
+                  chq "SHOW CREATE SETTINGS PROFILE ALL" >> "${BACKUP_DIR}/_access/settings_profiles.sql" 2>/dev/null || true
+
+                  cat > "${BACKUP_DIR}/restore.sh" <<'RESTORE_SCRIPT'
+                  #!/usr/bin/env bash
+                  # Usage: ./restore.sh <host> <port> <user> <password>
+                  # Requires: clickhouse-client (https://clickhouse.com/install.sh)
+                  set -euo pipefail
+
+                  HOST="${1:?host required}"
+                  PORT="${2:-9000}"
+                  USER="${3:?user required}"
+                  PASS="${4:?password required}"
+                  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+                  CH="clickhouse-client --host=${HOST} --port=${PORT} --user=${USER} --password=${PASS}"
+
+                  echo "==> Restoring access control..."
+                  for f in "${SCRIPT_DIR}/_access/roles.sql" "${SCRIPT_DIR}/_access/users.sql" \
+                            "${SCRIPT_DIR}/_access/grants.sql" "${SCRIPT_DIR}/_access/quotas.sql" \
+                            "${SCRIPT_DIR}/_access/settings_profiles.sql"; do
+                    [ -f "$f" ] && $CH --queries-file="$f" 2>/dev/null || true
+                  done
+
+                  for DB_DIR in "${SCRIPT_DIR}"/*/; do
+                    DB=$(basename "${DB_DIR}")
+                    [[ "$DB" == "_access" ]] && continue
+                    echo "==> Restoring database: ${DB}"
+
+                    $CH --query="$(cat "${DB_DIR}/create_database.sql")" || true
+
+                    for sql_file in "${DB_DIR}"*.sql; do
+                      TABLE=$(basename "${sql_file}" .sql)
+                      [[ "$TABLE" == "create_database" ]] && continue
+                      [ -f "${DB_DIR}${TABLE}.native" ] || continue
+                      echo "  Create table: ${TABLE}"
+                      $CH --query="$(cat "${sql_file}")" || true
+                    done
+
+                    for sql_file in "${DB_DIR}"*.sql; do
+                      TABLE=$(basename "${sql_file}" .sql)
+                      [[ "$TABLE" == "create_database" ]] && continue
+                      [ -f "${DB_DIR}${TABLE}.native" ] && continue
+                      echo "  Create view: ${TABLE}"
+                      $CH --query="$(cat "${sql_file}")" || true
+                    done
+
+                    for native_file in "${DB_DIR}"*.native; do
+                      [ -f "${native_file}" ] || continue
+                      TABLE=$(basename "${native_file}" .native)
+                      echo "  Insert data: ${TABLE}"
+                      $CH --query="INSERT INTO \`${DB}\`.\`${TABLE}\` FORMAT Native" < "${native_file}"
+                    done
+                  done
+
+                  echo "==> Restore complete."
+                  RESTORE_SCRIPT
+                  chmod +x "${BACKUP_DIR}/restore.sh"
+
+                  echo "==> Compressing..."
+                  tar -czf "${ARCHIVE}" -C /tmp "ch-backup-${BACKUP_DATE}"
+
+                  echo "==> Uploading to GCS..."
+                  rclone copy "${ARCHIVE}" "gcs:nrp-aime/clickhouse-backups"
+                  echo "==> Done: ch-backup-${BACKUP_DATE}.tar.gz"
+
+                  # Keep only 14 most recent backups in GCS
+                  rclone ls "gcs:nrp-aime/clickhouse-backups" \
+                    | sort | head -n -14 \
+                    | awk '{print $2}' \
+                    | xargs -I{} rclone deletefile "gcs:nrp-aime/clickhouse-backups/{}" || true

@@ -6,6 +6,8 @@ namespace: access-accounting
 resources:
 - ../../../../k8s/base
 - sealed-secret.yaml
+- sealed-secret-gcs.yaml
+- sealed-secret-ch-backup-creds.yaml
 
 patches:
 - path: configmap.yaml

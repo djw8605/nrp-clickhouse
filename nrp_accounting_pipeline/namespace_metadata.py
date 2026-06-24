@@ -39,6 +39,15 @@ def _normalize_joined(value: object) -> str:
     return _normalize_scalar(value)
 
 
+def _normalize_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "t", "yes", "y"}
+
+
 def _extract_namespace_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if payload.get("error"):
         raise RuntimeError(f"portal JSON-RPC returned an error: {payload['error']}")
@@ -156,6 +165,7 @@ def fetch_namespace_metadata(
             admins=_normalize_joined(row.get("Admins")),
             user_institutions=_normalize_joined(row.get("UserInstitutions")),
             updated_at=updated_at,
+            commercial=_normalize_bool(row.get("Commercial", row.get("commercial"))),
         )
 
     parsed_rows = [rows_by_namespace[name] for name in sorted(rows_by_namespace)]
@@ -192,6 +202,7 @@ def merge_namespace_metadata_rows(
                 admins=alias_source.admins,
                 user_institutions=alias_source.user_institutions,
                 updated_at=alias_source.updated_at,
+                commercial=alias_source.commercial,
             )
             continue
 

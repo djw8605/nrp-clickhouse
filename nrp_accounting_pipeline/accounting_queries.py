@@ -106,6 +106,7 @@ _GROUPABLE_EXPRESSIONS: dict[str, str] = {
     "unit": "usage.unit",
     "institution": "coalesce(meta.institution, 'Unknown')",
     "pi": "coalesce(meta.pi, 'Unknown')",
+    "commercial": "if(coalesce(meta.commercial, false), 'true', 'false')",
     "node_institution": "coalesce(node_map.institution_name, 'Unknown')",
     "pod_name": "usage.pod_name",
 }
@@ -118,6 +119,7 @@ _LISTABLE_DIMENSIONS = {
     "raw_resource": _GROUPABLE_EXPRESSIONS["raw_resource"],
     "gpu_model_name": _GROUPABLE_EXPRESSIONS["gpu_model_name"],
     "pi": _GROUPABLE_EXPRESSIONS["pi"],
+    "commercial": _GROUPABLE_EXPRESSIONS["commercial"],
     "node_institution": _GROUPABLE_EXPRESSIONS["node_institution"],
     "pod_name": _GROUPABLE_EXPRESSIONS["pod_name"],
 }
@@ -125,12 +127,14 @@ _LISTABLE_DIMENSIONS = {
 _TOP_DIMENSIONS = {
     "namespace": _GROUPABLE_EXPRESSIONS["namespace"],
     "institution": _GROUPABLE_EXPRESSIONS["institution"],
+    "commercial": _GROUPABLE_EXPRESSIONS["commercial"],
     "node": _GROUPABLE_EXPRESSIONS["node"],
 }
 
 _TIMESERIES_DIMENSIONS = {
     "namespace": _GROUPABLE_EXPRESSIONS["namespace"],
     "institution": _GROUPABLE_EXPRESSIONS["institution"],
+    "commercial": _GROUPABLE_EXPRESSIONS["commercial"],
     "node": _GROUPABLE_EXPRESSIONS["node"],
     "node_institution": _GROUPABLE_EXPRESSIONS["node_institution"],
 }
@@ -157,6 +161,7 @@ _NAMESPACE_METADATA_COLUMNS = [
     "admins",
     "user_institutions",
     "updated_at",
+    "commercial",
 ]
 
 
@@ -1631,7 +1636,8 @@ SELECT
   institution,
   admins,
   user_institutions,
-  updated_at
+  updated_at,
+  commercial
 FROM {metadata_table}
 WHERE namespace = {_sql_string_literal(namespace)}
 LIMIT 1

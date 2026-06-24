@@ -126,6 +126,7 @@ def query_resource_usage(
     - namespace
     - institution
     - pi
+    - commercial
     - node
     - node_institution
     - created_by
@@ -388,7 +389,7 @@ def get_usage_timeseries(
     gpu_model_regex: str | None = None,
     limit: int = 366,
 ) -> dict[str, object]:
-    """Get a daily usage trend for one namespace, institution, node, or node-institution value.
+    """Get a daily usage trend for one namespace, institution, commercial flag, node, or node-institution value.
 
     Resource inputs use canonical names like gpu, cpu, or llm. For example, use resource='llm' for
     namespace token trends. Common aliases such as gpu_hours, cpu_core_hours, and llm_tokens are

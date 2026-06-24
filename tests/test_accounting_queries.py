@@ -96,6 +96,30 @@ def test_build_resource_usage_query_applies_filters_and_latest_date_default() ->
     assert spec.group_by == ["namespace", "institution", "node", "resource", "unit"]
 
 
+def test_build_resource_usage_query_accepts_commercial_dimension() -> None:
+    client = PatternClient(
+        [
+            (
+                "SELECT max(date) FROM accounting.cluster_namespace_usage_daily",
+                FakeQueryResult([(date(2026, 4, 21),)], ["max(date)"]),
+            ),
+        ]
+    )
+
+    spec = build_resource_usage_query(
+        client,
+        group_by=["namespace", "commercial", "resource", "unit"],
+        settings=TEST_SETTINGS,
+    )
+
+    assert "if(coalesce(meta.commercial, false), 'true', 'false') AS commercial" in spec.sql
+    assert (
+        "GROUP BY usage.namespace, if(coalesce(meta.commercial, false), 'true', 'false'), "
+        "usage.resource, usage.unit"
+    ) in spec.sql
+    assert spec.group_by == ["namespace", "commercial", "resource", "unit"]
+
+
 def test_build_resource_usage_query_applies_gpu_model_filters() -> None:
     client = PatternClient(
         [
@@ -671,6 +695,7 @@ def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
                             "admin1,admin2",
                             "Delta University",
                             datetime(2026, 4, 21, 12, 0, 0),
+                            True,
                         ),
                     ],
                     [
@@ -680,6 +705,7 @@ def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
                         "admins",
                         "user_institutions",
                         "updated_at",
+                        "commercial",
                     ],
                 ),
             ),
@@ -768,6 +794,7 @@ def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
     assert result["namespace"] == "demo-ns"
     assert result["latest_data_date"] == "2026-04-21"
     assert result["metadata"]["institution"] == "Delta University"
+    assert result["metadata"]["commercial"] is True
     assert len(result["latest_summary"]) == 3
     assert len(result["daily_trend"]) == 2
     assert set(result["top_nodes_by_resource"]) == {"gpu", "cpu"}

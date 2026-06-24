@@ -327,7 +327,7 @@ def _fetch_existing_namespace_metadata(
     table_name = table_qualified_name(settings.CLICKHOUSE_DATABASE, NAMESPACE_METADATA_TABLE_NAME)
     namespace_list = ", ".join(_sql_string_literal(namespace) for namespace in sorted(set(namespaces)))
     query = (
-        f"SELECT namespace, pi, institution, admins, user_institutions, updated_at "
+        f"SELECT namespace, pi, institution, admins, user_institutions, updated_at, commercial "
         f"FROM {table_name} WHERE namespace IN ({namespace_list})"
     )
 
@@ -344,6 +344,7 @@ def _fetch_existing_namespace_metadata(
             admins=row[3],
             user_institutions=row[4],
             updated_at=row[5],
+            commercial=bool(row[6]),
         )
         for row in result_rows
     }
@@ -377,6 +378,7 @@ def insert_namespace_metadata(
                     "admins",
                     "user_institutions",
                     "updated_at",
+                    "commercial",
                 ],
             )
 
@@ -412,6 +414,7 @@ def update_namespace_metadata(
             f"institution = {_sql_string_literal(row.institution)}, "
             f"admins = {_sql_string_literal(row.admins)}, "
             f"user_institutions = {_sql_string_literal(row.user_institutions)}, "
+            f"commercial = {1 if row.commercial else 0}, "
             f"updated_at = parseDateTimeBestEffort({timestamp_literal}) "
             f"WHERE namespace = {_sql_string_literal(row.namespace)} "
             f"SETTINGS mutations_sync = 1"
@@ -459,6 +462,7 @@ def sync_namespace_metadata(
             or existing.institution != row.institution
             or existing.admins != row.admins
             or existing.user_institutions != row.user_institutions
+            or existing.commercial != row.commercial
         ):
             rows_to_update.append(row)
 

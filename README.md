@@ -101,6 +101,7 @@ Columns:
 - `admins String`
 - `user_institutions String`
 - `updated_at DateTime`
+- `commercial Bool DEFAULT false`
 
 ## What Data Goes Where
 
@@ -325,8 +326,8 @@ Available tools:
 - `list_active_namespaces`: namespaces with observed usage in a date window, defaulting to the last 30 days
 - `list_filter_values`: discover distinct namespaces, institutions, nodes, resources, and other values observed in usage rows for the filtered date range
 - `list_llm_filter_values`: discover distinct namespaces, token aliases, models, and token types observed in daily LLM rows
-- `top_resource_consumers`: top namespaces, institutions, or nodes for one resource
-- `get_usage_timeseries`: daily trend for one namespace, institution, node, or node-institution
+- `top_resource_consumers`: top namespaces, institutions, commercial flags, or nodes for one resource
+- `get_usage_timeseries`: daily trend for one namespace, institution, commercial flag, node, or node-institution
 - `get_namespace_summary`: latest or date-bounded namespace summary by resource
 - `get_namespace_daily_trend`: namespace trend view, defaulting to the last 30 days
 - `get_namespace_llm_summary`: latest or date-bounded namespace LLM summary by token alias, model, and token type
@@ -351,7 +352,7 @@ Supported filters:
 - For example, use `resource=gpu` for GPU-hours queries, `resource=cpu` for CPU core-hour queries, and `resource=llm` for namespace-level LLM token totals; units come back separately
 - Units are returned separately in the `unit` field, for example `resource=gpu` yields `unit=gpu_hours`
 - `granularity`: `namespace` or `pod`
-- `group_by`: any of `date`, `namespace`, `institution`, `pi`, `node`, `node_institution`, `created_by`, `resource`, `raw_resource`, `gpu_model_name`, `unit`, and `pod_name` (pod granularity only)
+- `group_by`: any of `date`, `namespace`, `institution`, `pi`, `commercial`, `node`, `node_institution`, `created_by`, `resource`, `raw_resource`, `gpu_model_name`, `unit`, and `pod_name` (pod granularity only)
 - LLM-specific filters: `token_alias`, `model`, and `token_type`
 - LLM-specific `group_by`: any of `date`, `namespace`, `token_alias`, `model`, and `token_type`
 

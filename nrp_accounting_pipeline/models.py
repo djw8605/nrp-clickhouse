@@ -150,6 +150,7 @@ class NamespaceMetadataRecord:
     admins: str
     user_institutions: str
     updated_at: datetime
+    commercial: bool
 
     @classmethod
     def unknown(
@@ -165,6 +166,7 @@ class NamespaceMetadataRecord:
             admins="Unknown",
             user_institutions="Unknown",
             updated_at=updated_at,
+            commercial=False,
         )
 
     def to_clickhouse_tuple(self) -> tuple[object, ...]:
@@ -175,6 +177,7 @@ class NamespaceMetadataRecord:
             self.admins,
             self.user_institutions,
             self.updated_at,
+            self.commercial,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -185,4 +188,5 @@ class NamespaceMetadataRecord:
             "admins": self.admins,
             "user_institutions": self.user_institutions,
             "updated_at": self.updated_at.isoformat(),
+            "commercial": self.commercial,
         }

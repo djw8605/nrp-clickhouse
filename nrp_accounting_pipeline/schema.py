@@ -66,6 +66,7 @@ NAMESPACE_METADATA_EXPECTED_COLUMNS: list[tuple[str, str]] = [
     ("admins", "String"),
     ("user_institutions", "String"),
     ("updated_at", "DateTime"),
+    ("commercial", "Bool"),
 ]
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -170,7 +171,8 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NAMESPACE_METADATA_TA
     institution LowCardinality(String),
     admins String,
     user_institutions String,
-    updated_at DateTime
+    updated_at DateTime,
+    commercial Bool DEFAULT false
 )
 ENGINE = MergeTree
 ORDER BY namespace

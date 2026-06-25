@@ -48,13 +48,6 @@ def _normalize_bool(value: object) -> bool:
     return text in {"1", "true", "t", "yes", "y"}
 
 
-def _extract_commercial_value(row: Mapping[str, Any]) -> object:
-    for field_name in ("is_commercial", "IsCommercial", "Commercial", "commercial"):
-        if field_name in row:
-            return row[field_name]
-    return None
-
-
 def _extract_namespace_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if payload.get("error"):
         raise RuntimeError(f"portal JSON-RPC returned an error: {payload['error']}")
@@ -172,7 +165,7 @@ def fetch_namespace_metadata(
             admins=_normalize_joined(row.get("Admins")),
             user_institutions=_normalize_joined(row.get("UserInstitutions")),
             updated_at=updated_at,
-            commercial=_normalize_bool(_extract_commercial_value(row)),
+            commercial=_normalize_bool(row.get("IsCommercial")),
         )
 
     parsed_rows = [rows_by_namespace[name] for name in sorted(rows_by_namespace)]

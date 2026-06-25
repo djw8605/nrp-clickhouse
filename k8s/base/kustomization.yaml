@@ -9,6 +9,7 @@ resources:
   - secret.yaml
   - cronjob-etl.yaml
   - cronjob-xdmod-upload.yaml
+  - cronjob-backup.yaml
   - deployment-mcp.yaml
   - deployment-openapi.yaml
   - service-mcp.yaml

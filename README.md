@@ -208,6 +208,7 @@ Deployed components:
 
 - `CronJob/nrp-accounting-etl`: daily accounting ETL
 - `CronJob/nrp-accounting-xdmod-upload`: daily XDMod upload, separate from ETL so XDMod failures do not affect ClickHouse ingestion
+- `CronJob/nrp-accounting-backup`: daily ClickHouse backup at 10:00 UTC — dumps all tables in the `access_accounting` database to GCS via rclone using a Google service account; see [k8s/base/cronjob-backup.yaml](k8s/base/cronjob-backup.yaml)
 - `Deployment/nrp-accounting-mcp`: read-only MCP server over streamable HTTP
 - `Deployment/nrp-accounting-openapi`: OpenAPI bridge for Open WebUI and other OpenAPI clients
 - `Service/nrp-accounting-mcp`: cluster-internal service on port `8000`
@@ -389,6 +390,30 @@ When deployed with the included Kubernetes ingress:
 - external MCP clients should connect to `https://nrp-accounting-mcp.nrp-nautilus.io/`
 - external OpenAPI clients should connect to `https://nrp-accounting-mcp.nrp-nautilus.io/openapi`
 - the generated OpenAPI docs are served at `https://nrp-accounting-mcp.nrp-nautilus.io/openapi/docs`
+
+## ClickHouse Cluster and Database Setup
+
+These are reference files for the infrastructure that the ETL pipeline depends on. They are not managed by the kustomize overlays in this repo — apply them separately before deploying the pipeline.
+
+### ClickHouse Cluster
+
+[k8s/clickhouse-installation.yaml](k8s/clickhouse-installation.yaml) defines the `ClickHouseInstallation` CRD (Altinity operator) for the `access-accounting` cluster in the `clickhouse` namespace. It provisions:
+
+- 1 shard, 2 replicas (`aime` cluster)
+- Zookeeper via `clickhouse-keeper-headless.clickhouse.svc.cluster.local:9181`
+- `linstor-ha` persistent volume, 50Gi per host
+- Resource limits: 8 CPU / 32Gi memory; requests: 4 CPU / 16Gi memory
+- Tolerates `nautilus.io/system` taint
+
+Apply with:
+
+```bash
+kubectl apply -f k8s/clickhouse-installation.yaml
+```
+
+### Database Schema
+
+[docs/schema/access_accounting.sql](docs/schema/access_accounting.sql) contains the `CREATE TABLE` statements for all tables in the `access_accounting` ClickHouse database. Use this as a reference when setting up a new cluster or verifying schema drift.
 
 ## Institution Mapping CSV Import
 

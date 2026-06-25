@@ -44,7 +44,7 @@ class FakePortalResponse:
                         "Institution": "Delta University",
                         "Admins": ["admin1", "admin2"],
                         "UserInstitutions": ["Delta University"],
-                        "commercial": True,
+                        "is_commercial": True,
                     }
                 ]
             }
@@ -56,7 +56,7 @@ class FakePortalSession:
         return FakePortalResponse()
 
 
-def test_fetch_namespace_metadata_parses_commercial_field(monkeypatch) -> None:
+def test_fetch_namespace_metadata_parses_is_commercial_field(monkeypatch) -> None:
     monkeypatch.setattr(namespace_metadata_module, "requests", object())
 
     rows = fetch_namespace_metadata(
@@ -66,6 +66,40 @@ def test_fetch_namespace_metadata_parses_commercial_field(monkeypatch) -> None:
 
     assert len(rows) == 1
     assert rows[0].namespace == "commercial-ns"
+    assert rows[0].commercial is True
+
+
+def test_fetch_namespace_metadata_parses_live_is_commercial_field(monkeypatch) -> None:
+    monkeypatch.setattr(namespace_metadata_module, "requests", object())
+
+    class LivePortalResponse(FakePortalResponse):
+        def json(self) -> dict[str, object]:
+            return {
+                "result": {
+                    "Namespaces": [
+                        {
+                            "Name": "live-commercial-ns",
+                            "PI": "Dr Example",
+                            "Institution": "Delta University",
+                            "Admins": ["admin1", "admin2"],
+                            "UserInstitutions": ["Delta University"],
+                            "IsCommercial": True,
+                        }
+                    ]
+                }
+            }
+
+    class LivePortalSession:
+        def post(self, *args, **kwargs) -> LivePortalResponse:
+            return LivePortalResponse()
+
+    rows = fetch_namespace_metadata(
+        settings=TEST_SETTINGS,
+        session=LivePortalSession(),
+    )
+
+    assert len(rows) == 1
+    assert rows[0].namespace == "live-commercial-ns"
     assert rows[0].commercial is True
 
 

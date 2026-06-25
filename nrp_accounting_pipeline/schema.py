@@ -70,6 +70,13 @@ NAMESPACE_METADATA_EXPECTED_COLUMNS: list[tuple[str, str]] = [
 ]
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CLUSTER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Replication coordinates for the Altinity operator. The {uuid}, {shard} and
+# {replica} macros are injected per-host by the operator (see system.macros), so
+# every replica derives the same ZooKeeper/Keeper path for a given table.
+REPLICATED_PATH = "/clickhouse/tables/{uuid}/{shard}"
+REPLICATED_NAME = "{replica}"
 
 
 def _safe_identifier(name: str) -> str:
@@ -78,17 +85,41 @@ def _safe_identifier(name: str) -> str:
     return name
 
 
+def _on_cluster_clause(cluster: str) -> str:
+    """Return ' ON CLUSTER `<cluster>`' when replication is enabled, else ''."""
+    cluster = (cluster or "").strip()
+    if not cluster:
+        return ""
+    if not _CLUSTER_RE.match(cluster):
+        raise ValueError(f"Unsafe cluster name: {cluster!r}")
+    return f" ON CLUSTER `{cluster}`"
+
+
+def _merge_tree_engine(base_engine: str, cluster: str) -> str:
+    """Map a *MergeTree engine to its Replicated* variant when a cluster is set.
+
+    With no cluster (single-node / dev) the plain engine is returned so the
+    schema still works without ClickHouse Keeper.
+    """
+    if (cluster or "").strip():
+        return f"Replicated{base_engine}('{REPLICATED_PATH}', '{REPLICATED_NAME}')"
+    return base_engine
+
+
 def table_qualified_name(database: str, table_name: str) -> str:
     return f"{_safe_identifier(database)}.{_safe_identifier(table_name)}"
 
 
-def create_database_sql(database: str) -> str:
-    return f"CREATE DATABASE IF NOT EXISTS {_safe_identifier(database)}"
+def create_database_sql(database: str, cluster: str = "") -> str:
+    return (
+        f"CREATE DATABASE IF NOT EXISTS {_safe_identifier(database)}"
+        f"{_on_cluster_clause(cluster)}"
+    )
 
 
-def create_pod_table_sql(database: str) -> str:
+def create_pod_table_sql(database: str, cluster: str = "") -> str:
     return f"""
-CREATE TABLE IF NOT EXISTS {table_qualified_name(database, POD_TABLE_NAME)}
+CREATE TABLE IF NOT EXISTS {table_qualified_name(database, POD_TABLE_NAME)}{_on_cluster_clause(cluster)}
 (
     date Date,
     namespace LowCardinality(String),
@@ -103,15 +134,15 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, POD_TABLE_NAME)}
     usage Decimal64(6),
     unit LowCardinality(String)
 )
-ENGINE = MergeTree
+ENGINE = {_merge_tree_engine("MergeTree", cluster)}
 PARTITION BY toYYYYMM(date)
 ORDER BY (date, namespace, node, resource, raw_resource, gpu_model_name, pod_hash, pod_uid)
 """.strip()
 
 
-def _create_namespace_table_sql(database: str, table_name: str) -> str:
+def _create_namespace_table_sql(database: str, table_name: str, cluster: str = "") -> str:
     return f"""
-CREATE TABLE IF NOT EXISTS {table_qualified_name(database, table_name)}
+CREATE TABLE IF NOT EXISTS {table_qualified_name(database, table_name)}{_on_cluster_clause(cluster)}
 (
     date Date,
     namespace LowCardinality(String),
@@ -123,19 +154,19 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, table_name)}
     usage Decimal64(6),
     unit LowCardinality(String)
 )
-ENGINE = SummingMergeTree
+ENGINE = {_merge_tree_engine("SummingMergeTree", cluster)}
 PARTITION BY toYYYYMM(date)
 ORDER BY ({NAMESPACE_SORTING_KEY})
 """.strip()
 
 
-def create_namespace_table_sql(database: str) -> str:
-    return _create_namespace_table_sql(database, NAMESPACE_TABLE_NAME)
+def create_namespace_table_sql(database: str, cluster: str = "") -> str:
+    return _create_namespace_table_sql(database, NAMESPACE_TABLE_NAME, cluster)
 
 
-def create_llm_token_table_sql(database: str) -> str:
+def create_llm_token_table_sql(database: str, cluster: str = "") -> str:
     return f"""
-CREATE TABLE IF NOT EXISTS {table_qualified_name(database, LLM_TOKEN_TABLE_NAME)}
+CREATE TABLE IF NOT EXISTS {table_qualified_name(database, LLM_TOKEN_TABLE_NAME)}{_on_cluster_clause(cluster)}
 (
     date Date,
     namespace LowCardinality(String),
@@ -144,27 +175,27 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, LLM_TOKEN_TABLE_NAME)
     token_type LowCardinality(String),
     tokens_used Decimal64(6)
 )
-ENGINE = MergeTree
+ENGINE = {_merge_tree_engine("MergeTree", cluster)}
 PARTITION BY toYYYYMM(date)
 ORDER BY (date, namespace, token_alias, model, token_type)
 """.strip()
 
 
-def create_node_institution_table_sql(database: str) -> str:
+def create_node_institution_table_sql(database: str, cluster: str = "") -> str:
     return f"""
-CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NODE_INSTITUTION_TABLE_NAME)}
+CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NODE_INSTITUTION_TABLE_NAME)}{_on_cluster_clause(cluster)}
 (
     node String,
     institution_name LowCardinality(String)
 )
-ENGINE = MergeTree
+ENGINE = {_merge_tree_engine("MergeTree", cluster)}
 ORDER BY node
 """.strip()
 
 
-def create_namespace_metadata_table_sql(database: str) -> str:
+def create_namespace_metadata_table_sql(database: str, cluster: str = "") -> str:
     return f"""
-CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NAMESPACE_METADATA_TABLE_NAME)}
+CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NAMESPACE_METADATA_TABLE_NAME)}{_on_cluster_clause(cluster)}
 (
     namespace String,
     pi LowCardinality(String),
@@ -174,7 +205,7 @@ CREATE TABLE IF NOT EXISTS {table_qualified_name(database, NAMESPACE_METADATA_TA
     updated_at DateTime,
     commercial Bool DEFAULT false
 )
-ENGINE = MergeTree
+ENGINE = {_merge_tree_engine("MergeTree", cluster)}
 ORDER BY namespace
 """.strip()
 
@@ -217,7 +248,9 @@ def _namespace_rebuild_select_expression(column_name: str) -> str:
     return column_name
 
 
-def _rebuild_namespace_table_if_sort_key_changed(client, database: str) -> None:
+def _rebuild_namespace_table_if_sort_key_changed(
+    client, database: str, cluster: str = ""
+) -> None:
     actual_sorting_key = _fetch_sorting_key(client, database, NAMESPACE_TABLE_NAME)
     if not actual_sorting_key:
         return
@@ -241,7 +274,9 @@ def _rebuild_namespace_table_if_sort_key_changed(client, database: str) -> None:
             "backup_table": backup_table,
         },
     )
-    client.command(_create_namespace_table_sql(database, replacement_table))
+    client.command(_create_namespace_table_sql(database, replacement_table, cluster))
+    # INSERT runs once; on a Replicated* engine the rows propagate to every replica
+    # via the replication log, so we deliberately do not fan this out ON CLUSTER.
     client.command(
         f"INSERT INTO {table_qualified_name(database, replacement_table)} ({columns_sql}) "
         f"SELECT {select_sql} FROM {table_qualified_name(database, NAMESPACE_TABLE_NAME)}"
@@ -251,6 +286,7 @@ def _rebuild_namespace_table_if_sort_key_changed(client, database: str) -> None:
         f"TO {table_qualified_name(database, backup_table)}, "
         f"{table_qualified_name(database, replacement_table)} "
         f"TO {table_qualified_name(database, NAMESPACE_TABLE_NAME)}"
+        f"{_on_cluster_clause(cluster)}"
     )
 
 
@@ -269,6 +305,7 @@ def _apply_table_migrations(
     database: str,
     table_name: str,
     expected_columns: list[tuple[str, str]],
+    cluster: str = "",
 ) -> None:
     existing_columns = _fetch_existing_columns(client, database, table_name)
 
@@ -278,7 +315,7 @@ def _apply_table_migrations(
 
         if existing_type is None:
             statement = (
-                f"ALTER TABLE {full_table} "
+                f"ALTER TABLE {full_table}{_on_cluster_clause(cluster)} "
                 f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
             )
             logger.info(
@@ -302,27 +339,33 @@ def _apply_table_migrations(
             )
 
 
-def ensure_schema(client, database: str) -> None:
-    client.command(create_database_sql(database))
-    client.command(create_pod_table_sql(database))
-    client.command(create_namespace_table_sql(database))
-    client.command(create_llm_token_table_sql(database))
-    client.command(create_node_institution_table_sql(database))
-    client.command(create_namespace_metadata_table_sql(database))
+def ensure_schema(client, database: str, cluster: str = "") -> None:
+    client.command(create_database_sql(database, cluster))
+    client.command(create_pod_table_sql(database, cluster))
+    client.command(create_namespace_table_sql(database, cluster))
+    client.command(create_llm_token_table_sql(database, cluster))
+    client.command(create_node_institution_table_sql(database, cluster))
+    client.command(create_namespace_metadata_table_sql(database, cluster))
 
-    _apply_table_migrations(client, database, POD_TABLE_NAME, POD_EXPECTED_COLUMNS)
-    _apply_table_migrations(client, database, NAMESPACE_TABLE_NAME, NAMESPACE_EXPECTED_COLUMNS)
-    _rebuild_namespace_table_if_sort_key_changed(client, database)
-    _apply_table_migrations(client, database, LLM_TOKEN_TABLE_NAME, LLM_TOKEN_EXPECTED_COLUMNS)
+    _apply_table_migrations(client, database, POD_TABLE_NAME, POD_EXPECTED_COLUMNS, cluster)
+    _apply_table_migrations(
+        client, database, NAMESPACE_TABLE_NAME, NAMESPACE_EXPECTED_COLUMNS, cluster
+    )
+    _rebuild_namespace_table_if_sort_key_changed(client, database, cluster)
+    _apply_table_migrations(
+        client, database, LLM_TOKEN_TABLE_NAME, LLM_TOKEN_EXPECTED_COLUMNS, cluster
+    )
     _apply_table_migrations(
         client,
         database,
         NODE_INSTITUTION_TABLE_NAME,
         NODE_INSTITUTION_EXPECTED_COLUMNS,
+        cluster,
     )
     _apply_table_migrations(
         client,
         database,
         NAMESPACE_METADATA_TABLE_NAME,
         NAMESPACE_METADATA_EXPECTED_COLUMNS,
+        cluster,
     )

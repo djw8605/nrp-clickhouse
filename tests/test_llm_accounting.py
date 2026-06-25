@@ -146,6 +146,23 @@ def test_create_llm_token_table_sql_contains_expected_schema() -> None:
     assert "ORDER BY (date, namespace, token_alias, model, token_type)" in sql
 
 
+def test_create_llm_token_table_sql_single_node_is_not_replicated() -> None:
+    sql = create_llm_token_table_sql("accounting")
+
+    assert "ON CLUSTER" not in sql
+    assert "ENGINE = MergeTree" in sql
+
+
+def test_create_llm_token_table_sql_replicated_with_cluster() -> None:
+    sql = create_llm_token_table_sql("accounting", "aime")
+
+    assert "ON CLUSTER `aime`" in sql
+    assert (
+        "ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')"
+        in sql
+    )
+
+
 def test_delete_existing_partitions_includes_llm_table() -> None:
     client = RecordingClient()
 

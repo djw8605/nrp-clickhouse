@@ -39,12 +39,12 @@ class FakePortalResponse:
             "result": {
                 "Namespaces": [
                     {
-                        "Name": "commercial-ns",
+                        "Name": "live-commercial-ns",
                         "PI": "Dr Example",
                         "Institution": "Delta University",
                         "Admins": ["admin1", "admin2"],
                         "UserInstitutions": ["Delta University"],
-                        "commercial": True,
+                        "IsCommercial": True,
                     }
                 ]
             }
@@ -56,7 +56,7 @@ class FakePortalSession:
         return FakePortalResponse()
 
 
-def test_fetch_namespace_metadata_parses_commercial_field(monkeypatch) -> None:
+def test_fetch_namespace_metadata_parses_live_is_commercial_field(monkeypatch) -> None:
     monkeypatch.setattr(namespace_metadata_module, "requests", object())
 
     rows = fetch_namespace_metadata(
@@ -65,7 +65,7 @@ def test_fetch_namespace_metadata_parses_commercial_field(monkeypatch) -> None:
     )
 
     assert len(rows) == 1
-    assert rows[0].namespace == "commercial-ns"
+    assert rows[0].namespace == "live-commercial-ns"
     assert rows[0].commercial is True
 
 

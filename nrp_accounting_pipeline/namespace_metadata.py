@@ -165,7 +165,7 @@ def fetch_namespace_metadata(
             admins=_normalize_joined(row.get("Admins")),
             user_institutions=_normalize_joined(row.get("UserInstitutions")),
             updated_at=updated_at,
-            commercial=_normalize_bool(row.get("Commercial", row.get("commercial"))),
+            commercial=_normalize_bool(row.get("IsCommercial")),
         )
 
     parsed_rows = [rows_by_namespace[name] for name in sorted(rows_by_namespace)]

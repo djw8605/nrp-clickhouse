@@ -158,6 +158,7 @@ export CLICKHOUSE_HOST="clickhouse.example.org"   # or clickhouse.example.org:28
 export CLICKHOUSE_USER="default"
 export CLICKHOUSE_PASSWORD="..."
 export CLICKHOUSE_DATABASE="accounting"
+export CLICKHOUSE_CLUSTER="aime"          # enables ON CLUSTER DDL + Replicated* engines; leave empty for single-node
 export MAX_QUERY_WORKERS=8
 export QUERY_STEP="1h"
 export RETRY_LIMIT=4
@@ -171,6 +172,8 @@ export XDMOD_MAX_BYTES_PER_POST=5000000
 ```
 
 `CLICKHOUSE_HOST` supports `host` or `host:port`. If a port is embedded in `CLICKHOUSE_HOST`, it takes precedence over `CLICKHOUSE_PORT`.
+
+`CLICKHOUSE_CLUSTER` is the cluster name from `system.clusters` (`aime` in production). When set, `ensure_schema` issues `CREATE`/`ALTER`/`RENAME` as `ON CLUSTER` and creates tables with `Replicated*` engines so data is replicated across both replicas. Leave it empty for a single-node ClickHouse with no Keeper. For HA, point `CLICKHOUSE_HOST` at the operator's load-balanced cluster service (`clickhouse-access-accounting.clickhouse.svc.cluster.local`) rather than an individual replica pod.
 
 ## Kubernetes (Kustomize)
 
@@ -397,13 +400,15 @@ These are reference files for the infrastructure that the ETL pipeline depends o
 
 ### ClickHouse Cluster
 
-[k8s/clickhouse-installation.yaml](k8s/clickhouse-installation.yaml) defines the `ClickHouseInstallation` CRD (Altinity operator) for the `access-accounting` cluster in the `clickhouse` namespace. It provisions:
+[k8s/clickhouse-installation.yaml](k8s/clickhouse-installation.yaml) defines both the `ClickHouseKeeperInstallation` and the `ClickHouseInstallation` CRDs (Altinity operator) for the `access-accounting` cluster in the `clickhouse` namespace. It provisions:
 
-- 1 shard, 2 replicas (`aime` cluster)
-- Zookeeper via `clickhouse-keeper-headless.clickhouse.svc.cluster.local:9181`
-- `linstor-ha` persistent volume, 50Gi per host
+- 1 shard, 2 replicas (`aime` cluster) — full data redundancy; pod anti-affinity keeps the replicas on separate nodes
+- A dedicated 3-node ClickHouse Keeper ensemble (`aime-keeper`) for replication coordination, reachable at `chk-aime-keeper-keeper-0-{0,1,2}.clickhouse.svc.cluster.local:2181`
+- `linstor-ha` persistent volume, 50Gi per ClickHouse host (Keeper uses 5Gi on `rook-ceph-block`)
 - Resource limits: 8 CPU / 32Gi memory; requests: 4 CPU / 16Gi memory
 - Tolerates `nautilus.io/system` taint
+
+All accounting tables use `Replicated*` engines, so the schema in `nrp_accounting_pipeline/schema.py` is created `ON CLUSTER aime` whenever `CLICKHOUSE_CLUSTER` is set (see [docs/schema/access_accounting.sql](docs/schema/access_accounting.sql)).
 
 Apply with:
 

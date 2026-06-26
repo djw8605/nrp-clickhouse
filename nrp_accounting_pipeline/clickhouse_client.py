@@ -100,7 +100,11 @@ def connect_clickhouse(settings: Settings | None = None):
         secure=active_settings.CLICKHOUSE_SECURE,
         database="default",
     )
-    bootstrap_client.command(create_database_sql(active_settings.CLICKHOUSE_DATABASE))
+    bootstrap_client.command(
+        create_database_sql(
+            active_settings.CLICKHOUSE_DATABASE, active_settings.CLICKHOUSE_CLUSTER
+        )
+    )
     bootstrap_client.close()
 
     return clickhouse_connect.get_client(
@@ -119,7 +123,11 @@ def create_tables_if_not_exist(client, settings: Settings | None = None) -> None
     _retry_with_backoff(
         "create_tables_if_not_exist",
         active_settings.RETRY_LIMIT,
-        lambda: ensure_schema(client, active_settings.CLICKHOUSE_DATABASE),
+        lambda: ensure_schema(
+            client,
+            active_settings.CLICKHOUSE_DATABASE,
+            active_settings.CLICKHOUSE_CLUSTER,
+        ),
     )
 
 

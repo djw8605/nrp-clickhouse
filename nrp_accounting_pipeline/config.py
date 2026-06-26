@@ -89,6 +89,9 @@ class Settings:
     MCP_ENABLE_DNS_REBINDING_PROTECTION: bool
     MCP_ALLOWED_HOSTS: list[str]
     MCP_ALLOWED_ORIGINS: list[str]
+    # Name of the ClickHouse cluster (system.clusters) used for ON CLUSTER DDL and
+    # Replicated* table engines. Empty = single-node / no replication (e.g. dev).
+    CLICKHOUSE_CLUSTER: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -105,6 +108,7 @@ def get_settings() -> Settings:
         CLICKHOUSE_USER=os.getenv("CLICKHOUSE_USER", "default"),
         CLICKHOUSE_PASSWORD=os.getenv("CLICKHOUSE_PASSWORD", ""),
         CLICKHOUSE_DATABASE=os.getenv("CLICKHOUSE_DATABASE", default_clickhouse_database),
+        CLICKHOUSE_CLUSTER=os.getenv("CLICKHOUSE_CLUSTER", ""),
         MAX_QUERY_WORKERS=_env_int("MAX_QUERY_WORKERS", 5),
         QUERY_STEP=os.getenv("QUERY_STEP", "1h"),
         RETRY_LIMIT=_env_int("RETRY_LIMIT", 3),

@@ -1,0 +1,145 @@
+# ClickHouse cluster + Keeper for the NRP accounting pipeline (Altinity operator).
+#
+# Reference infrastructure — NOT managed by the kustomize overlays in this repo.
+# Apply separately, into the `clickhouse` namespace, before deploying the pipeline:
+#
+#     kubectl apply -n clickhouse -f k8s/clickhouse-installation.yaml
+#
+# Topology: 1 shard x 2 replicas (cluster "aime") for high availability, coordinated
+# by a 3-node ClickHouse Keeper ensemble (tolerates 1 keeper failure). All tables use
+# Replicated* engines so each replica holds a full copy of the data.
+# This must stay in sync with CLICKHOUSE_CLUSTER ("aime") in the app ConfigMaps and
+# the Replicated* DDL in nrp_accounting_pipeline/schema.py.
+---
+apiVersion: clickhouse-keeper.altinity.com/v1
+kind: ClickHouseKeeperInstallation
+metadata:
+  name: aime-keeper
+  namespace: clickhouse
+spec:
+  configuration:
+    clusters:
+      - name: keeper
+        layout:
+          # 3-node ensemble: quorum survives the loss of any single keeper.
+          replicasCount: 3
+  defaults:
+    templates:
+      dataVolumeClaimTemplate: keeper-data
+      podTemplate: keeper-pod
+  templates:
+    podTemplates:
+      - name: keeper-pod
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: topology.kubernetes.io/zone
+                        operator: In
+                        values:
+                          - ucsd-sdsc
+            # Spread the 3 keeper pods across distinct nodes.
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      clickhouse-keeper.altinity.com/chk: aime-keeper
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: clickhouse-keeper
+              image: altinity/clickhouse-keeper:25.3.8.10042.altinitystable
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+    volumeClaimTemplates:
+      - name: keeper-data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
+          storageClassName: rook-ceph-block
+---
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: access-accounting
+  namespace: clickhouse
+spec:
+  configuration:
+    clusters:
+      - name: aime
+        layout:
+          # 1 shard, 2 replicas => full data redundancy across two hosts.
+          shardsCount: 1
+          replicasCount: 2
+    zookeeper:
+      # Coordination for ReplicatedMergeTree tables, served by the keeper above.
+      nodes:
+        - host: chk-aime-keeper-keeper-0-0.clickhouse.svc.cluster.local
+          port: 2181
+        - host: chk-aime-keeper-keeper-0-1.clickhouse.svc.cluster.local
+          port: 2181
+        - host: chk-aime-keeper-keeper-0-2.clickhouse.svc.cluster.local
+          port: 2181
+    settings:
+      prometheus/endpoint: /metrics
+      prometheus/port: 9363
+    users:
+      default/networks/ip:
+        - 0.0.0.0/0
+      aime/networks/ip:
+        - 0.0.0.0/0
+      # Do not commit real credentials. Set this out-of-band (e.g. a sealed secret /
+      # `kubectl edit chi`) to the SHA-256 hex of the `aime` user password.
+      aime/password_sha256_hex: REPLACE_WITH_SHA256_HEX
+  defaults:
+    templates:
+      dataVolumeClaimTemplate: ch-data
+      podTemplate: ch-pod
+  templates:
+    podTemplates:
+      - name: ch-pod
+        spec:
+          # Keep the two replicas on different nodes so one node loss never takes
+          # out both copies.
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      clickhouse.altinity.com/chi: access-accounting
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: clickhouse
+              image: altinity/clickhouse-server:25.8.16.10001.altinitystable
+              ports:
+                - name: metrics
+                  containerPort: 9363
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+          tolerations:
+            - key: nautilus.io/system
+              operator: Exists
+              effect: NoSchedule
+    volumeClaimTemplates:
+      - name: ch-data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 50Gi
+          storageClassName: linstor-ha

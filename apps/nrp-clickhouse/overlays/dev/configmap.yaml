@@ -6,6 +6,9 @@ data:
   PROMETHEUS_URL: "https://thanos.nrp-nautilus.io"
   PORTAL_RPC_URL: "https://portal.nrp.ai/rpc"
   CLICKHOUSE_DATABASE: "access_accounting"
+  # ClickHouse cluster name (system.clusters). Enables ON CLUSTER DDL and
+  # Replicated* table engines across the 2-replica HA topology (chi-access-accounting-aime).
+  CLICKHOUSE_CLUSTER: "aime"
   CLICKHOUSE_PORT: "8123"
   CLICKHOUSE_SECURE: "false"
   MAX_QUERY_WORKERS: "8"

@@ -40,11 +40,14 @@ from nrp_accounting_pipeline.etl import (
 # Configuration
 # ---------------------------------------------------------------------------
 
+# Default to the same endpoint and timeout the production ETL uses: the
+# phase-joined requests query takes ~100s cluster-wide, which exceeds the
+# plain prometheus.nrp-nautilus.io gateway's ~60s proxy timeout.
 PROMETHEUS_URL = os.environ.get(
-    "PROMETHEUS_URL", "https://prometheus.nrp-nautilus.io"
+    "PROMETHEUS_URL", "https://thanos.nrp-nautilus.io"
 ).rstrip("/")
 
-TIMEOUT = int(os.environ.get("PROMETHEUS_TIMEOUT_SECONDS", "60"))
+TIMEOUT = int(os.environ.get("PROMETHEUS_TIMEOUT_SECONDS", "300"))
 
 # Use yesterday as the target date so the @timestamp query always resolves.
 TARGET_DATE = date.today() - timedelta(days=1)
@@ -114,7 +117,7 @@ def _get_live_llm_payload() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(360)
 def test_prometheus_reachable():
     """Prometheus /api/v1/query endpoint responds successfully."""
     resp = requests.get(
@@ -128,7 +131,7 @@ def test_prometheus_reachable():
     print(f"\n  [OK] Prometheus at {PROMETHEUS_URL} is reachable")
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(360)
 def test_pod_resource_requests_has_data():
     """kube_pod_container_resource_requests returns at least one time series."""
     payload = _instant_query("kube_pod_container_resource_requests")
@@ -137,7 +140,7 @@ def test_pod_resource_requests_has_data():
     print(f"\n  [OK] kube_pod_container_resource_requests: {len(series)} series found")
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(360)
 def test_annotation_nrp_ai_username_label_exists_in_prometheus():
     """
     count by (annotation_nrp_ai_username) (kube_pod_annotations)
@@ -161,7 +164,7 @@ def test_annotation_nrp_ai_username_label_exists_in_prometheus():
     )
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(360)
 def test_etl_query_returns_data():
     """The production ETL query (sum_over_time … @timestamp) returns series."""
     payload = _get_live_payload()
@@ -170,7 +173,7 @@ def test_etl_query_returns_data():
     print(f"\n  [OK] ETL query returned {len(series)} series")
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(360)
 def test_llm_etl_query_returns_data():
     """The production LLM ETL query returns at least one time series."""
     payload = _get_live_llm_payload()
@@ -179,7 +182,7 @@ def test_llm_etl_query_returns_data():
     print(f"\n  [OK] LLM ETL query returned {len(series)} series")
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(360)
 def test_llm_etl_query_has_expected_labels():
     """The LLM ETL query preserves namespace, token, model, and token type labels."""
     payload = _get_live_llm_payload()
@@ -195,7 +198,7 @@ def test_llm_etl_query_has_expected_labels():
     print(f"\n  [OK] LLM ETL labels present on sample series: {first}")
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(360)
 def test_annotation_label_present_in_etl_query():
     """
     At least one series returned by the ETL query carries

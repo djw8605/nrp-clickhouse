@@ -31,8 +31,14 @@ logger = logging.getLogger(__name__)
 
 
 POD_RESOURCE_METRIC_NAME = "kube_pod_container_resource_requests"
+# kube-state-metrics exports resource requests for every pod object that still
+# exists — Pending, Succeeded, and Failed included — so requests are only billed
+# while the pod is actually Running (i.e. holds the resources on a node).
 POD_RESOURCE_REQUESTS_QUERY_TEMPLATE = (
-    "sum_over_time(kube_pod_container_resource_requests[1d:5m]@{end_ts})"
+    "sum_over_time((kube_pod_container_resource_requests"
+    " * on(namespace, pod) group_left()"
+    ' max by(namespace, pod) (kube_pod_status_phase{{phase="Running"}} == 1)'
+    ")[1d:5m]@{end_ts})"
 )
 POD_ANNOTATIONS_QUERY_TEMPLATE = (
     "max_over_time(kube_pod_annotations[1d:5m]@{end_ts})"

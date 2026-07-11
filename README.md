@@ -105,8 +105,8 @@ Columns:
 
 ## What Data Goes Where
 
-- Source metric: `kube_pod_container_resource_requests`
-- Daily query method: `sum_over_time(kube_pod_container_resource_requests[1d:5m]@end_ts)`
+- Source metric: `kube_pod_container_resource_requests`, restricted to pods in the `Running` phase (kube-state-metrics also exports requests for Pending/Succeeded/Failed pod objects, which must not be billed)
+- Daily query method: `sum_over_time((kube_pod_container_resource_requests * on(namespace, pod) group_left() max by(namespace, pod) (kube_pod_status_phase{phase="Running"} == 1))[1d:5m]@end_ts)`
 - User attribution source: `max_over_time(kube_pod_annotations[1d:5m]@end_ts)` joined locally by namespace, pod, and UID
 - GPU model attribution source: `max_over_time(DCGM_FI_DEV_GPU_UTIL{modelName!=""}[1d:5m]@end_ts)` joined locally by namespace, pod, and container; if that direct match is absent, the ETL falls back to a single-model DCGM `Hostname == node`, then typed `raw_resource`, then `unknown`
 - LLM source metric: `gen_ai_client_token_usage_sum`
@@ -501,9 +501,10 @@ ORDER BY u.date DESC, u.namespace, u.node, u.resource;
 
 ## Reliability + Idempotency
 
-- Daily usage query via `sum_over_time(kube_pod_container_resource_requests[1d:5m]@end_ts)`, enriched with pod annotations for user attribution
+- Daily usage query via `sum_over_time((kube_pod_container_resource_requests * on(namespace, pod) group_left() max by(namespace, pod) (kube_pod_status_phase{phase="Running"} == 1))[1d:5m]@end_ts)`, enriched with pod annotations for user attribution
 - Retries with exponential backoff for Prometheus, `portal.nrp.ai`, and ClickHouse operations
 - Idempotent daily writes by deleting existing date rows before insert
+- Usage inserts set a per-run `insert_deduplication_token` so re-ingesting a date (nightly rerun or backfill) is never silently dropped by ReplicatedMergeTree block dedup, while retried batches stay idempotent
 - Namespace metadata rows are inserted for new namespaces and updated when portal metadata changes
 - Namespace metadata rows are never deleted automatically, even if a namespace later disappears from the portal
 - Structured JSON logging for query duration, retries, row counts, and aggregation timing

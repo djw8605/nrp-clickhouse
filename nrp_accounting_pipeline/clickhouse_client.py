@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from datetime import date
 from typing import Callable, Iterable, Sequence
 
@@ -136,6 +137,16 @@ def _chunk_rows(rows: Sequence, batch_size: int) -> Iterable[Sequence]:
         yield rows[idx : idx + batch_size]
 
 
+def _new_dedup_token_prefix(table_name: str) -> str:
+    # ReplicatedMergeTree deduplicates inserts whose block checksum matches a
+    # recently inserted block. The pipeline deletes rows and re-inserts them
+    # (nightly reruns, backfills), which is exactly the pattern that block
+    # dedup silently drops. A token unique per run makes re-ingested data
+    # insert cleanly, while reusing the token across retries of the same batch
+    # keeps a retried-but-already-committed insert idempotent.
+    return f"{table_name}-{uuid.uuid4().hex}"
+
+
 def _delete_for_date(client, table_name: str, target_date: date, settings: Settings) -> None:
     statement = (
         f"ALTER TABLE {table_qualified_name(settings.CLICKHOUSE_DATABASE, table_name)} "
@@ -168,9 +179,11 @@ def insert_pod_usage(
     batch_size = max(1, active_settings.CLICKHOUSE_WRITE_BATCH_SIZE)
     table_name = table_qualified_name(active_settings.CLICKHOUSE_DATABASE, POD_TABLE_NAME)
 
+    dedup_token_prefix = _new_dedup_token_prefix(POD_TABLE_NAME)
     inserted = 0
-    for batch in _chunk_rows(rows, batch_size):
+    for batch_index, batch in enumerate(_chunk_rows(rows, batch_size)):
         payload = [row.to_clickhouse_tuple() for row in batch]
+        dedup_token = f"{dedup_token_prefix}-{batch_index}"
 
         def _insert_batch() -> None:
             client.insert(
@@ -190,6 +203,7 @@ def insert_pod_usage(
                     "usage",
                     "unit",
                 ],
+                settings={"insert_deduplication_token": dedup_token},
             )
 
         _retry_with_backoff("insert_pod_usage_batch", active_settings.RETRY_LIMIT, _insert_batch)
@@ -212,9 +226,11 @@ def insert_namespace_usage(
     batch_size = max(1, active_settings.CLICKHOUSE_WRITE_BATCH_SIZE)
     table_name = table_qualified_name(active_settings.CLICKHOUSE_DATABASE, NAMESPACE_TABLE_NAME)
 
+    dedup_token_prefix = _new_dedup_token_prefix(NAMESPACE_TABLE_NAME)
     inserted = 0
-    for batch in _chunk_rows(rows, batch_size):
+    for batch_index, batch in enumerate(_chunk_rows(rows, batch_size)):
         payload = [row.to_clickhouse_tuple() for row in batch]
+        dedup_token = f"{dedup_token_prefix}-{batch_index}"
 
         def _insert_batch() -> None:
             client.insert(
@@ -231,6 +247,7 @@ def insert_namespace_usage(
                     "usage",
                     "unit",
                 ],
+                settings={"insert_deduplication_token": dedup_token},
             )
 
         _retry_with_backoff(
@@ -255,9 +272,11 @@ def insert_llm_token_usage(
     batch_size = max(1, active_settings.CLICKHOUSE_WRITE_BATCH_SIZE)
     table_name = table_qualified_name(active_settings.CLICKHOUSE_DATABASE, LLM_TOKEN_TABLE_NAME)
 
+    dedup_token_prefix = _new_dedup_token_prefix(LLM_TOKEN_TABLE_NAME)
     inserted = 0
-    for batch in _chunk_rows(rows, batch_size):
+    for batch_index, batch in enumerate(_chunk_rows(rows, batch_size)):
         payload = [row.to_clickhouse_tuple() for row in batch]
+        dedup_token = f"{dedup_token_prefix}-{batch_index}"
 
         def _insert_batch() -> None:
             client.insert(
@@ -271,6 +290,7 @@ def insert_llm_token_usage(
                     "token_type",
                     "tokens_used",
                 ],
+                settings={"insert_deduplication_token": dedup_token},
             )
 
         _retry_with_backoff(
@@ -301,16 +321,19 @@ def replace_node_institution_mapping(
         return 0
 
     batch_size = max(1, active_settings.CLICKHOUSE_WRITE_BATCH_SIZE)
+    dedup_token_prefix = _new_dedup_token_prefix(NODE_INSTITUTION_TABLE_NAME)
     inserted = 0
 
-    for batch in _chunk_rows(rows, batch_size):
+    for batch_index, batch in enumerate(_chunk_rows(rows, batch_size)):
         payload = [row.to_clickhouse_tuple() for row in batch]
+        dedup_token = f"{dedup_token_prefix}-{batch_index}"
 
         def _insert_batch() -> None:
             client.insert(
                 table_name,
                 payload,
                 column_names=["node", "institution_name"],
+                settings={"insert_deduplication_token": dedup_token},
             )
 
         _retry_with_backoff(

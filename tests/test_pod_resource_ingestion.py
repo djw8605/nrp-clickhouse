@@ -9,6 +9,7 @@ from nrp_accounting_pipeline.aggregation import (
 )
 from nrp_accounting_pipeline.etl import (
     GPU_MODEL_QUERY_TEMPLATE,
+    POD_RESOURCE_REQUESTS_QUERY_TEMPLATE,
     attach_gpu_model_names_to_resource_payload,
     attach_pod_annotations_to_resource_payload,
 )
@@ -57,6 +58,17 @@ def test_attach_pod_annotations_to_resource_payload_matches_by_uid() -> None:
     metric = enriched["data"]["result"][0]["metric"]
     assert metric["pod"] == "trainer-0"
     assert metric["annotation_nrp_ai_username"] == "jane.doe"
+
+
+def test_pod_resource_requests_query_bills_only_running_pods() -> None:
+    query = POD_RESOURCE_REQUESTS_QUERY_TEMPLATE.format(end_ts=1769040000)
+
+    assert query == (
+        "sum_over_time((kube_pod_container_resource_requests"
+        " * on(namespace, pod) group_left()"
+        ' max by(namespace, pod) (kube_pod_status_phase{phase="Running"} == 1)'
+        ")[1d:5m]@1769040000)"
+    )
 
 
 def test_gpu_model_query_template_preserves_prometheus_label_selector() -> None:
@@ -258,6 +270,139 @@ def test_aggregate_daily_metrics_skips_implausible_cpu_request_samples() -> None
     assert [(row.pod_name, row.usage) for row in rows] == [
         ("airflow-redis-0", Decimal("0.100000"))
     ]
+
+
+def test_aggregate_daily_metrics_skips_cpu_requests_above_lowered_cap() -> None:
+    # A day-long request of ~3,500 cores passed the old 1M-core cap; no pod
+    # legitimately requests more than the largest node (a few hundred cores).
+    payload = {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "namespace": "analytics",
+                        "pod": "typo-cores",
+                        "uid": "pod-uid-1",
+                        "node": "cpu-node-a",
+                        "resource": "cpu",
+                    },
+                    "value": [1746748800, "1000000"],
+                }
+            ]
+        }
+    }
+
+    rows = aggregate_daily_metrics(
+        {"kube_pod_container_resource_requests": payload},
+        target_date=date(2026, 7, 10),
+    )
+
+    assert rows == []
+
+
+def test_aggregate_daily_metrics_skips_implausible_gpu_request_samples() -> None:
+    payload = {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "namespace": "analytics",
+                        "pod": "typo-gpus",
+                        "uid": "pod-uid-1",
+                        "node": "gpu-node-a",
+                        "resource": "nvidia_com_gpu",
+                    },
+                    # 1,000 GPUs held for a full day of 5m samples.
+                    "value": [1746748800, "288000"],
+                },
+                {
+                    "metric": {
+                        "namespace": "analytics",
+                        "pod": "full-node",
+                        "uid": "pod-uid-2",
+                        "node": "gpu-node-a",
+                        "resource": "nvidia_com_gpu",
+                    },
+                    # 8 GPUs held for a full day: plausible.
+                    "value": [1746748800, "2304"],
+                },
+            ]
+        }
+    }
+
+    rows = aggregate_daily_metrics(
+        {"kube_pod_container_resource_requests": payload},
+        target_date=date(2026, 7, 10),
+    )
+
+    assert [(row.pod_name, row.usage) for row in rows] == [
+        ("full-node", Decimal("192.000000"))
+    ]
+
+
+def test_aggregate_daily_metrics_skips_implausible_memory_request_samples() -> None:
+    payload = {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "namespace": "analytics",
+                        "pod": "typo-memory",
+                        "uid": "pod-uid-1",
+                        "node": "cpu-node-a",
+                        "resource": "memory",
+                    },
+                    # ~1 PB requested for a full day of 5m samples.
+                    "value": [1746748800, "288000000000000000"],
+                },
+                {
+                    "metric": {
+                        "namespace": "analytics",
+                        "pod": "sane-memory",
+                        "uid": "pod-uid-2",
+                        "node": "cpu-node-a",
+                        "resource": "memory",
+                    },
+                    "value": [1746748800, "12000000000"],
+                },
+            ]
+        }
+    }
+
+    rows = aggregate_daily_metrics(
+        {"kube_pod_container_resource_requests": payload},
+        target_date=date(2026, 7, 10),
+    )
+
+    assert [(row.pod_name, row.usage) for row in rows] == [
+        ("sane-memory", Decimal("1.000000"))
+    ]
+
+
+def test_aggregate_daily_metrics_skips_implausible_storage_request_samples() -> None:
+    payload = {
+        "data": {
+            "result": [
+                {
+                    "metric": {
+                        "namespace": "analytics",
+                        "pod": "typo-storage",
+                        "uid": "pod-uid-1",
+                        "node": "cpu-node-a",
+                        "resource": "ephemeral_storage",
+                    },
+                    "value": [1746748800, "288000000000000000"],
+                }
+            ]
+        }
+    }
+
+    rows = aggregate_daily_metrics(
+        {"kube_pod_container_resource_requests": payload},
+        target_date=date(2026, 7, 10),
+    )
+
+    assert rows == []
 
 
 def test_attach_gpu_model_names_to_resource_payload_matches_pod_container() -> None:

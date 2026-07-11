@@ -48,12 +48,20 @@ class RecordingClient:
     def command(self, statement: str) -> None:
         self.commands.append(statement)
 
-    def insert(self, table_name: str, payload: object, *, column_names: list[str]) -> None:
+    def insert(
+        self,
+        table_name: str,
+        payload: object,
+        *,
+        column_names: list[str],
+        settings: dict[str, object] | None = None,
+    ) -> None:
         self.inserts.append(
             {
                 "table_name": table_name,
                 "payload": payload,
                 "column_names": column_names,
+                "settings": dict(settings or {}),
             }
         )
 

@@ -24,7 +24,18 @@ DEFAULT_DAY_SECONDS = 24 * 3600.0
 SUBQUERY_STEP_MINUTES = 5
 SAMPLES_PER_HOUR = 60 / SUBQUERY_STEP_MINUTES
 SAMPLES_PER_DAY = 24 * SAMPLES_PER_HOUR
-MAX_REASONABLE_CPU_REQUEST_CORES = 1_000_000.0
+
+# Per-pod request ceilings used to reject typo'd resource requests that
+# Kubernetes accepts verbatim (e.g. `cpu: 10G` parses as 10 billion cores).
+# Values are generous multiples of the largest node in the cluster, in the
+# metric's native units (cores, devices, bytes).
+MAX_REASONABLE_REQUEST_BY_RESOURCE = {
+    "cpu": 2_048.0,
+    "gpu": 64.0,
+    "fpga": 64.0,
+    "memory": 64.0 * 1024.0**4,
+    "storage": 64.0 * 1024.0**4,
+}
 
 _RESOURCE_TO_UNIT = {
     "cpu": "cpu_core_hours",
@@ -279,24 +290,28 @@ def _series_usage_for_metric(metric_name: str, resource_name: str, points: list[
     return sum(value for _, value in points)
 
 
+def _max_plausible_sum_over_time(metric_name: str, resource_name: str) -> float | None:
+    metric = metric_name.lower()
+    if (
+        "namespace_allocated_resources" not in metric
+        and "kube_pod_container_resource_requests" not in metric
+    ):
+        return None
+
+    max_request = MAX_REASONABLE_REQUEST_BY_RESOURCE.get(normalize_resource(resource_name))
+    if max_request is None:
+        return None
+    return max_request * SAMPLES_PER_DAY
+
+
 def _series_samples_are_plausible(
     metric_name: str,
     resource_name: str,
     points: list[tuple[float, float]],
 ) -> bool:
-    normalized = normalize_resource(resource_name)
-    metric = metric_name.lower()
-
-    if normalized != "cpu":
+    max_sum_over_time_value = _max_plausible_sum_over_time(metric_name, resource_name)
+    if max_sum_over_time_value is None:
         return True
-
-    if (
-        "namespace_allocated_resources" not in metric
-        and "kube_pod_container_resource_requests" not in metric
-    ):
-        return True
-
-    max_sum_over_time_value = MAX_REASONABLE_CPU_REQUEST_CORES * SAMPLES_PER_DAY
     return all(abs(value) <= max_sum_over_time_value for _, value in points)
 
 
@@ -351,14 +366,15 @@ def aggregate_daily_metrics(
 
             if not _series_samples_are_plausible(metric_name, raw_resource, points):
                 logger.warning(
-                    "aggregation_skip_implausible_cpu_sample",
+                    "aggregation_skip_implausible_request_sample",
                     extra={
                         "metric": metric_name,
                         "resource": raw_resource,
                         "labels": labels,
                         "sample_values": [value for _, value in points],
-                        "max_sum_over_time_value": MAX_REASONABLE_CPU_REQUEST_CORES
-                        * SAMPLES_PER_DAY,
+                        "max_sum_over_time_value": _max_plausible_sum_over_time(
+                            metric_name, raw_resource
+                        ),
                     },
                 )
                 continue

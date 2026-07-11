@@ -12,7 +12,7 @@ on:
       prometheus_url:
         description: "Prometheus URL override"
         required: false
-        default: "https://prometheus.nrp-nautilus.io"
+        default: "https://thanos.nrp-nautilus.io"
 
 permissions:
   contents: read
@@ -23,8 +23,11 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      PROMETHEUS_URL: ${{ github.event.inputs.prometheus_url || 'https://prometheus.nrp-nautilus.io' }}
-      PROMETHEUS_TIMEOUT_SECONDS: "90"
+      # thanos.nrp-nautilus.io, not prometheus.nrp-nautilus.io: the phase-joined
+      # ETL query takes ~100s cluster-wide and the plain prometheus ingress
+      # gateway 504s at ~60s. Matches the defaults in tests/test_etl_dryrun.py.
+      PROMETHEUS_URL: ${{ github.event.inputs.prometheus_url || 'https://thanos.nrp-nautilus.io' }}
+      PROMETHEUS_TIMEOUT_SECONDS: "300"
 
     steps:
       - name: Checkout
@@ -72,7 +75,7 @@ jobs:
           python -m pytest tests/test_etl_dryrun.py \
             --verbose \
             --tb=short \
-            --timeout=120 \
+            --timeout=360 \
             -s \
             2>&1
         env:
@@ -89,7 +92,7 @@ jobs:
 
           from nrp_accounting_pipeline.aggregation import aggregate_daily_metrics, aggregate_namespace_usage
 
-          PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "https://prometheus.nrp-nautilus.io").rstrip("/")
+          PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "https://thanos.nrp-nautilus.io").rstrip("/")
           import urllib.request, urllib.parse
 
           target_date = date.today() - timedelta(days=1)

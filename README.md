@@ -128,7 +128,9 @@ Columns:
   - `memory -> memory_gb_hours`
   - `storage -> storage_gb_hours`
   - `network -> network_gb`
+  - `wall -> wall_hours`
   - `other -> other`
+- `resource='wall'` is pod wall time in hours, sourced from `kube_pod_status_phase{phase="Running"}`. It is not a billable resource: it is the denominator that converts core-hours and gpu-hours back into the device counts a pod held, which the XDMod uploader needs. Because it shares the `usage` column with billable resources, always filter or group by `resource` when summing.
 
 Row placement:
 
@@ -280,7 +282,11 @@ Options:
 python xdmod_upload.py --date 2026-03-13
 ```
 
-The XDMod uploader reads already-ingested `cluster_pod_usage_daily` rows from ClickHouse, joins `namespace_metadata_mapping` for the namespace institution, and POSTs one JSON array of daily pod records to `XDMOD_ENDPOINT`. If the payload exceeds `XDMOD_MAX_RECORDS_PER_POST` or `XDMOD_MAX_BYTES_PER_POST`, it is split into multiple POSTs. An HTTP `413` response also causes the current batch to be split and retried.
+The XDMod uploader reads already-ingested `cluster_pod_usage_daily` rows from ClickHouse, joins `namespace_metadata_mapping` for the namespace institution, and POSTs one JSON array of daily pod records to `XDMOD_ENDPOINT`.
+
+Each record separates device counts from device hours: `CPU` and `GPU` are the devices the pod held, computed as `CPUHours / WallHours` and `GPUHours / WallHours`, while `CPUHours` and `GPUHours` are the core-hours and gpu-hours stored in ClickHouse. `WallHours` comes from `resource='wall'`. `GPUType` is the pod's GPU model, or `mixed` when a pod spans several; `CPUType` is always empty because no CPU model data is collected. `Mem` and `Storage` remain GB-hours, and `NumberOfContainers` is always `1`.
+
+Dates ingested before 2026-07-28 have no `wall` rows. The uploader falls back to a 24-hour day for those and logs `xdmod_upload_wall_hours_missing` with the date and affected pod count, so `CPU` and `GPU` read as an average over the day rather than a true count until the date is re-run with `etl.py --force`. If the payload exceeds `XDMOD_MAX_RECORDS_PER_POST` or `XDMOD_MAX_BYTES_PER_POST`, it is split into multiple POSTs. An HTTP `413` response also causes the current batch to be split and retried.
 
 The Kubernetes uploader is intentionally a separate CronJob from `nrp-accounting-etl`, scheduled later in the morning. Its success or failure does not change Prometheus-to-ClickHouse ingestion.
 

@@ -11,12 +11,20 @@ from decimal import Decimal
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlsplit
 
+from .aggregation import GPU_MODEL_MIXED
 from .config import Settings, get_settings
 from .logging_config import configure_logging
 from .schema import NAMESPACE_METADATA_TABLE_NAME, POD_TABLE_NAME, table_qualified_name
 
 
 logger = logging.getLogger(__name__)
+
+# Wall hours assumed for dates ingested before wall hours were collected.  Device
+# counts on those dates become an average over the day instead of a true count.
+FALLBACK_WALL_HOURS = Decimal("24")
+# Device counts are ratios of Decimal(18, 6) values; match that precision so an
+# exact request serializes as an integer rather than 3.999999.
+_COUNT_QUANTUM = Decimal("0.000001")
 
 try:
     import requests
@@ -43,11 +51,45 @@ class XdmodUsageRecord:
     user_organization: str
     account: str
     record_date: date
-    cpu: Decimal
-    gpu: Decimal
+    wall_hours: Decimal
+    cpu_hours: Decimal
+    gpu_hours: Decimal
     fpga: Decimal
     mem: Decimal
     storage: Decimal
+    gpu_model_count: int
+    gpu_model_name: str
+    fpga_raw_resource: str
+
+    @property
+    def _has_device_hours(self) -> bool:
+        return self.cpu_hours > 0 or self.gpu_hours > 0
+
+    @property
+    def wall_hours_missing(self) -> bool:
+        """True when device-hours exist but no wall row was ingested for the date."""
+        return self.wall_hours <= 0 and self._has_device_hours
+
+    def effective_wall_hours(self) -> Decimal:
+        if self.wall_hours > 0:
+            return self.wall_hours
+        if self._has_device_hours:
+            # Dates ingested before wall hours existed: degrade to an average
+            # over the day rather than reporting a zero device count.
+            return FALLBACK_WALL_HOURS
+        return Decimal("0")
+
+    def _device_count(self, device_hours: Decimal) -> Decimal:
+        wall_hours = self.effective_wall_hours()
+        if wall_hours <= 0:
+            return Decimal("0")
+        return (device_hours / wall_hours).quantize(_COUNT_QUANTUM)
+
+    @property
+    def gpu_type(self) -> str:
+        if self.gpu_model_count > 1:
+            return GPU_MODEL_MIXED
+        return self.gpu_model_name
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -59,15 +101,39 @@ class XdmodUsageRecord:
             "Account": self.account,
             "RecordStartTime": f"{self.record_date.isoformat()} 00:00:00",
             "RecordEndTime": f"{self.record_date.isoformat()} 23:59:59",
-            "CPU": _json_number(self.cpu),
+            "WallHours": _json_number(self.effective_wall_hours()),
+            "CPU": _json_number(self._device_count(self.cpu_hours)),
             "CPUType": "",
-            "GPU": _json_number(self.gpu),
-            "GPUType": "",
+            "CPUHours": _json_number(self.cpu_hours),
+            "GPU": _json_number(self._device_count(self.gpu_hours)),
+            "GPUType": self.gpu_type,
+            "GPUHours": _json_number(self.gpu_hours),
             "FPGA": _json_number(self.fpga),
-            "FPGAType": "",
+            "FPGAType": self.fpga_raw_resource,
             "Mem": _json_number(self.mem if self.mem > 0 else Decimal("1")),
             "Storage": _json_number(self.storage if self.storage > 0 else Decimal("1")),
         }
+
+
+def build_payload_records(
+    records: Sequence[XdmodUsageRecord],
+    target_date: date | None = None,
+) -> list[dict[str, object]]:
+    """Serialize records, warning once about any date missing ingested wall hours."""
+    missing_wall_hours = [record for record in records if record.wall_hours_missing]
+    if missing_wall_hours:
+        warned_date = target_date or missing_wall_hours[0].record_date
+        logger.warning(
+            "xdmod_upload_wall_hours_missing",
+            extra={
+                "date": warned_date.isoformat(),
+                "pod_count": len(missing_wall_hours),
+                "fallback_wall_hours": int(FALLBACK_WALL_HOURS),
+                "remedy": "re-run etl.py --force for this date to ingest wall hours",
+            },
+        )
+
+    return [record.to_payload() for record in records]
 
 
 @dataclass(frozen=True)
@@ -158,15 +224,19 @@ SELECT
     usage.pod_uid,
     usage.pod_name,
     coalesce(nullIf(meta.institution, ''), 'Unknown') AS institution,
-    sumIf(usage.usage, usage.resource = 'cpu') AS cpu,
-    sumIf(usage.usage, usage.resource = 'gpu') AS gpu,
+    sumIf(usage.usage, usage.resource = 'cpu') AS cpu_hours,
+    sumIf(usage.usage, usage.resource = 'gpu') AS gpu_hours,
     sumIf(usage.usage, usage.resource = 'fpga') AS fpga,
     sumIf(usage.usage, usage.resource = 'memory') AS mem,
-    sumIf(usage.usage, usage.resource = 'storage') AS storage
+    sumIf(usage.usage, usage.resource = 'storage') AS storage,
+    sumIf(usage.usage, usage.resource = 'wall') AS wall_hours,
+    uniqExactIf(usage.gpu_model_name, usage.resource = 'gpu') AS gpu_model_count,
+    anyIf(usage.gpu_model_name, usage.resource = 'gpu') AS gpu_model_name,
+    anyIf(usage.raw_resource, usage.resource = 'fpga') AS fpga_raw_resource
 FROM {pod_table} AS usage
 LEFT JOIN {metadata_table} AS meta ON usage.namespace = meta.namespace
 WHERE usage.date = toDate({date_literal})
-  AND usage.resource IN ('cpu', 'gpu', 'fpga', 'memory', 'storage')
+  AND usage.resource IN ('cpu', 'gpu', 'fpga', 'memory', 'storage', 'wall')
 GROUP BY
     usage.date,
     usage.namespace,
@@ -214,11 +284,15 @@ def fetch_xdmod_usage_records(
             pod_uid=str(row[3] or ""),
             pod_name=str(row[4] or "unknown"),
             user_organization=str(row[5] or "Unknown"),
-            cpu=_to_decimal(row[6]),
-            gpu=_to_decimal(row[7]),
+            cpu_hours=_to_decimal(row[6]),
+            gpu_hours=_to_decimal(row[7]),
             fpga=_to_decimal(row[8]),
             mem=_to_decimal(row[9]),
             storage=_to_decimal(row[10]),
+            wall_hours=_to_decimal(row[11]),
+            gpu_model_count=int(row[12] or 0),
+            gpu_model_name=str(row[13] or ""),
+            fpga_raw_resource=str(row[14] or ""),
         )
         for row in result.result_rows
     ]
@@ -374,7 +448,7 @@ def upload_xdmod_records(
     if requests is None and session is None:
         raise RuntimeError("requests is not installed. Install dependencies to upload to XDMod.")
 
-    payload_records = [record.to_payload() for record in records]
+    payload_records = build_payload_records(records)
     if not payload_records:
         logger.info("xdmod_upload_skipped_no_records")
         return 0
@@ -431,7 +505,13 @@ def run_upload_for_date(
         raise RuntimeError(f"No ClickHouse pod usage records found for {target_date.isoformat()}")
 
     if dry_run:
-        print(json.dumps([record.to_payload() for record in records], indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                build_payload_records(records, target_date),
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return XdmodUploadResult(
             date=target_date,
             record_count=len(records),

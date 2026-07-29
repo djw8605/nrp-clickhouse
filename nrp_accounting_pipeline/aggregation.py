@@ -45,9 +45,14 @@ _RESOURCE_TO_UNIT = {
     "memory": "memory_gb_hours",
     "storage": "storage_gb_hours",
     "network": "network_gb",
+    "wall": "wall_hours",
 }
 
 LLM_RESOURCE = "llm"
+# Pod wall time.  Not a billable resource: it is the denominator that turns
+# core-hours and gpu-hours back into the device counts a pod actually held.
+WALL_RESOURCE = "wall"
+WALL_METRIC_NAME = "kube_pod_status_phase"
 LLM_CREATED_BY = "llm-gateway"
 LLM_NODE = "llm-gateway"
 UNKNOWN_LABEL_VALUE = "unknown"
@@ -73,6 +78,11 @@ def normalize_resource(resource_name: str) -> str:
 
     if value in {"llm", "llm_tokens"}:
         return LLM_RESOURCE
+
+    # Pod wall time, ingested from the Running-phase series.  Checked before the
+    # substring fallbacks below so it cannot be swallowed by them.
+    if value == WALL_RESOURCE or "kube_pod_status_phase" in value:
+        return WALL_RESOURCE
 
     # Primary mapping for namespace_allocated_resources (matches historical JS logic).
     if "amd_com_xilinx" in value:
@@ -258,6 +268,13 @@ def compute_pod_hash(pod_name: str) -> int:
 def _series_usage_for_metric(metric_name: str, resource_name: str, points: list[tuple[float, float]]) -> float:
     normalized = normalize_resource(resource_name)
     metric = metric_name.lower()
+
+    if normalized == WALL_RESOURCE or WALL_METRIC_NAME in metric:
+        # sum_over_time counted one sample per subquery step while the pod was
+        # Running; divide by SAMPLES_PER_HOUR to get wall hours.  Without this
+        # branch the function falls through to its bare sum below and stores the
+        # sample count (285) instead of the hours (23.75).
+        return sum(value for _, value in points) / SAMPLES_PER_HOUR
 
     if (
         "namespace_allocated_resources" in metric

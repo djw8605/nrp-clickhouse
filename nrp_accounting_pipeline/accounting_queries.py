@@ -33,6 +33,9 @@ _CANONICAL_RESOURCE_VALUES = (
     "memory",
     "storage",
     "network",
+    # Pod wall time, not a billable resource: the denominator that converts
+    # core-hours and gpu-hours back into device counts.
+    "wall",
     "other",
 )
 
@@ -59,6 +62,13 @@ _RESOURCE_INPUT_ALIASES = {
     "ram_gb": "memory",
     "ram_gb_hour": "memory",
     "ram_gb_hours": "memory",
+    "wall": "wall",
+    "wall_hour": "wall",
+    "wall_hours": "wall",
+    "walltime": "wall",
+    "wall_time": "wall",
+    "pod_hour": "wall",
+    "pod_hours": "wall",
     "storage": "storage",
     "storage_gb": "storage",
     "storage_gb_hour": "storage",

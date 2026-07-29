@@ -12,6 +12,7 @@ from .aggregation import (
     GPU_MODEL_MIXED,
     GPU_MODEL_NOT_APPLICABLE,
     GPU_MODEL_UNKNOWN,
+    UNKNOWN_LABEL_VALUE,
     aggregate_daily_metrics,
     aggregate_llm_namespace_usage,
     aggregate_llm_token_usage,
@@ -38,6 +39,17 @@ POD_RESOURCE_REQUESTS_QUERY_TEMPLATE = (
     "sum_over_time((kube_pod_container_resource_requests"
     " * on(namespace, pod) group_left()"
     ' max by(namespace, pod) (kube_pod_status_phase{{phase="Running"}} == 1)'
+    ")[1d:5m]@{end_ts})"
+)
+# Pod wall time. kube_pod_status_phase carries a `container` label naming the
+# kube-state-metrics scrape container, so the same pod can appear on more than one
+# series; `max by` collapses them before summing to avoid double-counting.  The
+# metric has no `node` label (its `instance` is the KSM pod IP), so node is joined
+# client-side from the resource payload — see attach_node_labels_to_payload.
+POD_WALL_HOURS_METRIC_NAME = "kube_pod_status_phase"
+POD_WALL_HOURS_QUERY_TEMPLATE = (
+    "sum_over_time((max by(namespace, pod, uid) "
+    '(kube_pod_status_phase{{phase="Running"}} == 1)'
     ")[1d:5m]@{end_ts})"
 )
 POD_ANNOTATIONS_QUERY_TEMPLATE = (
@@ -88,6 +100,69 @@ def _build_pod_annotation_lookup(
         by_pod.setdefault((namespace, pod), username)
 
     return by_uid, by_pod
+
+
+def _build_pod_node_lookup(
+    resource_payload: dict[str, Any],
+) -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str]]:
+    by_uid: dict[tuple[str, str, str], str] = {}
+    by_pod: dict[tuple[str, str], str] = {}
+
+    for series in resource_payload.get("data", {}).get("result", []):
+        labels = series.get("metric", {}) or {}
+        namespace = str(labels.get("namespace") or "")
+        pod = str(labels.get("pod") or "")
+        uid = str(labels.get("uid") or "")
+        node = str(labels.get("node") or "").strip()
+
+        if not namespace or not pod or not node:
+            continue
+
+        if uid:
+            by_uid.setdefault((namespace, pod, uid), node)
+        by_pod.setdefault((namespace, pod), node)
+
+    return by_uid, by_pod
+
+
+def attach_node_labels_to_payload(
+    payload: dict[str, Any],
+    resource_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy the `node` label from the resource payload onto another payload's series.
+
+    kube_pod_status_phase carries no `node` label, and its `instance` label is the
+    kube-state-metrics pod IP.  Leaving `node` unset would let
+    `_extract_node_label` fall back to `instance` and record "10.244.x.x" as the
+    node, so unmatched pods are pinned to "unknown" instead.
+    """
+    node_by_uid, node_by_pod = _build_pod_node_lookup(resource_payload)
+    data = payload.get("data", {})
+    enriched_result: list[dict[str, Any]] = []
+
+    for series in data.get("result", []):
+        enriched_series = dict(series)
+        labels = dict(series.get("metric", {}) or {})
+        namespace = str(labels.get("namespace") or "")
+        pod = str(labels.get("pod") or "")
+        uid = str(labels.get("uid") or "")
+
+        node = labels.get("node")
+        if not node:
+            if uid:
+                node = node_by_uid.get((namespace, pod, uid))
+            if not node:
+                node = node_by_pod.get((namespace, pod))
+
+        labels["node"] = str(node) if node else UNKNOWN_LABEL_VALUE
+        enriched_series["metric"] = labels
+        enriched_result.append(enriched_series)
+
+    enriched_payload = dict(payload)
+    enriched_data = dict(data)
+    enriched_data["result"] = enriched_result
+    enriched_payload["data"] = enriched_data
+    return enriched_payload
 
 
 def attach_pod_annotations_to_resource_payload(
@@ -276,7 +351,29 @@ def _query_allocated_resources(
         enriched_payload,
         dcgm_payload,
     )
-    return {POD_RESOURCE_METRIC_NAME: enriched_payload}
+
+    # Wall hours. Unlike the DCGM query above this failure is not tolerated:
+    # without wall hours every CPU/GPU count for the date silently falls back to
+    # the 24-hour approximation in xdmod_upload.
+    wall_query = POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=end_timestamp)
+    wall_payload = query_prometheus(
+        wall_query,
+        settings=settings,
+        timeout_seconds=settings.PROMETHEUS_TIMEOUT_SECONDS,
+        retry_limit=settings.RETRY_LIMIT,
+    )
+    # Annotations first so wall hours are attributed to the same user as the
+    # pod's resource rows, then node from the resource payload.
+    wall_payload = attach_pod_annotations_to_resource_payload(
+        wall_payload,
+        annotations_payload,
+    )
+    wall_payload = attach_node_labels_to_payload(wall_payload, enriched_payload)
+
+    return {
+        POD_RESOURCE_METRIC_NAME: enriched_payload,
+        POD_WALL_HOURS_METRIC_NAME: wall_payload,
+    }
 
 
 def _query_llm_token_usage(

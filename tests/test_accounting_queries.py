@@ -798,3 +798,31 @@ def test_get_namespace_details_composes_summary_trend_and_top_nodes() -> None:
     assert len(result["latest_summary"]) == 3
     assert len(result["daily_trend"]) == 2
     assert set(result["top_nodes_by_resource"]) == {"gpu", "cpu"}
+
+
+def test_wall_resource_and_its_aliases_are_queryable() -> None:
+    client = PatternClient([])
+
+    for alias in ("wall", "wall_hours", "pod_hours"):
+        spec = build_resource_usage_query(
+            client,
+            start_date=date(2026, 4, 21),
+            end_date=date(2026, 4, 21),
+            resource=alias,
+            settings=TEST_SETTINGS,
+        )
+
+        assert "usage.resource IN ('wall')" in spec.sql
+
+
+def test_unsupported_resource_is_still_rejected() -> None:
+    client = PatternClient([])
+
+    with pytest.raises(ValueError, match="Unsupported resource"):
+        build_resource_usage_query(
+            client,
+            start_date=date(2026, 4, 21),
+            end_date=date(2026, 4, 21),
+            resource="wallclock_nonsense",
+            settings=TEST_SETTINGS,
+        )

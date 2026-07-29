@@ -57,6 +57,12 @@ SETTINGS index_granularity = 8192;
 -- ---------------------------------------------------------------------------
 -- cluster_pod_usage_daily
 -- Daily resource usage at pod granularity.
+--
+-- resource='wall' (added 2026-07-28) is pod wall time in hours, not a billable
+-- resource.  It is the denominator that converts core-hours and gpu-hours back
+-- into the device counts a pod actually held: CPU = cpu_hours / wall_hours.
+-- Rows for dates ingested before 2026-07-28 have no wall row; re-run
+-- `etl.py --date <date> --force` to add them.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS access_accounting.cluster_pod_usage_daily
 (

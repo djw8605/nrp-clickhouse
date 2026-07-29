@@ -24,6 +24,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nrp_accounting_pipeline.aggregation import (
+    SAMPLES_PER_HOUR,
     aggregate_daily_metrics,
     aggregate_llm_token_usage,
     aggregate_namespace_usage,
@@ -33,6 +34,9 @@ from nrp_accounting_pipeline.etl import (
     POD_ANNOTATIONS_QUERY_TEMPLATE,
     POD_RESOURCE_METRIC_NAME,
     POD_RESOURCE_REQUESTS_QUERY_TEMPLATE,
+    POD_WALL_HOURS_METRIC_NAME,
+    POD_WALL_HOURS_QUERY_TEMPLATE,
+    attach_node_labels_to_payload,
     attach_pod_annotations_to_resource_payload,
 )
 
@@ -386,3 +390,73 @@ def test_normalize_resource(raw, expected):
     assert normalize_resource(raw) == expected, (
         f"normalize_resource({raw!r}) = {normalize_resource(raw)!r}, expected {expected!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Wall hours
+# ---------------------------------------------------------------------------
+
+
+def test_live_wall_hours_query_returns_plausible_pod_hours() -> None:
+    """Every pod's wall hours must fall inside a single day."""
+    payload = _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_END_TS))
+    series = payload["data"]["result"]
+
+    assert series, "no Running pods found for the target date"
+
+    for entry in series:
+        wall_hours = float(entry["value"][1]) / SAMPLES_PER_HOUR
+        labels = entry["metric"]
+        assert 0 < wall_hours <= 24, (
+            f"{labels.get('namespace')}/{labels.get('pod')} reported "
+            f"{wall_hours} wall hours"
+        )
+
+
+def test_live_wall_hours_aggregate_to_the_wall_resource() -> None:
+    payload = _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_END_TS))
+    resource_payload = _get_live_payload()
+
+    enriched = attach_node_labels_to_payload(payload, resource_payload)
+    rows = aggregate_daily_metrics({POD_WALL_HOURS_METRIC_NAME: enriched}, TARGET_DATE)
+
+    assert rows, "wall payload produced no pod rows"
+    assert {row.resource for row in rows} == {"wall"}
+    assert {row.unit for row in rows} == {"wall_hours"}
+    assert all(0 < float(row.usage) <= 24 for row in rows)
+    # The instance label is the kube-state-metrics pod IP; node must never be
+    # derived from it.
+    assert not any(row.node.startswith("10.244.") for row in rows)
+
+
+def test_live_cpu_hours_divided_by_wall_hours_yields_a_plausible_core_count() -> None:
+    """The ratio that becomes the XDMoD CPU field must look like a core count."""
+    wall_payload = attach_node_labels_to_payload(
+        _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_END_TS)),
+        _get_live_payload(),
+    )
+    rows = aggregate_daily_metrics(
+        {
+            POD_RESOURCE_METRIC_NAME: _get_live_payload(),
+            POD_WALL_HOURS_METRIC_NAME: wall_payload,
+        },
+        TARGET_DATE,
+    )
+
+    wall_by_pod: dict[tuple[str, str], float] = {}
+    cpu_by_pod: dict[tuple[str, str], float] = {}
+    for row in rows:
+        key = (row.namespace, row.pod_name)
+        if row.resource == "wall":
+            wall_by_pod[key] = wall_by_pod.get(key, 0.0) + float(row.usage)
+        elif row.resource == "cpu":
+            cpu_by_pod[key] = cpu_by_pod.get(key, 0.0) + float(row.usage)
+
+    shared = set(wall_by_pod) & set(cpu_by_pod)
+    assert shared, "no pod had both wall hours and cpu hours"
+
+    for key in shared:
+        if wall_by_pod[key] <= 0:
+            continue
+        cores = cpu_by_pod[key] / wall_by_pod[key]
+        assert 0 < cores <= 2_048, f"{key} implies {cores} cores"

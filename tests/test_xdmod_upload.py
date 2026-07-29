@@ -11,6 +11,7 @@ from nrp_accounting_pipeline.config import Settings
 from nrp_accounting_pipeline.xdmod_upload import (
     XdmodUploadSettings,
     XdmodUsageRecord,
+    build_payload_records,
     build_xdmod_usage_query,
     fetch_xdmod_usage_records,
     run_upload_for_date,
@@ -60,20 +61,26 @@ class RecordingQueryClient:
         self.closed = True
 
 
-def _record(name: str = "trainer-0") -> XdmodUsageRecord:
-    return XdmodUsageRecord(
-        pod_uid=f"{name}-uid",
-        pod_name=name,
-        user="jane.doe",
-        user_organization="Delta University",
-        account="analytics",
-        record_date=date(2025, 12, 15),
-        cpu=Decimal("24.500000"),
-        gpu=Decimal("2.000000"),
-        fpga=Decimal("0.000000"),
-        mem=Decimal("0.000000"),
-        storage=Decimal("12.250000"),
-    )
+def _record(name: str = "trainer-0", **overrides: object) -> XdmodUsageRecord:
+    fields: dict[str, object] = {
+        "pod_uid": f"{name}-uid",
+        "pod_name": name,
+        "user": "jane.doe",
+        "user_organization": "Delta University",
+        "account": "analytics",
+        "record_date": date(2025, 12, 15),
+        "wall_hours": Decimal("24.000000"),
+        "cpu_hours": Decimal("24.500000"),
+        "gpu_hours": Decimal("2.000000"),
+        "fpga": Decimal("0.000000"),
+        "mem": Decimal("0.000000"),
+        "storage": Decimal("12.250000"),
+        "gpu_model_count": 0,
+        "gpu_model_name": "",
+        "fpga_raw_resource": "",
+    }
+    fields.update(overrides)
+    return XdmodUsageRecord(**fields)  # type: ignore[arg-type]
 
 
 def _upload_settings() -> XdmodUploadSettings:
@@ -93,11 +100,27 @@ def test_build_xdmod_usage_query_pivots_resource_rows_without_node_dimension() -
 
     assert "FROM accounting.cluster_pod_usage_daily AS usage" in sql
     assert "LEFT JOIN accounting.namespace_metadata_mapping AS meta" in sql
-    assert "sumIf(usage.usage, usage.resource = 'cpu') AS cpu" in sql
+    assert "sumIf(usage.usage, usage.resource = 'cpu') AS cpu_hours" in sql
     assert "sumIf(usage.usage, usage.resource = 'storage') AS storage" in sql
     assert "usage.pod_uid" in sql
     assert "usage.date = toDate('2025-12-15')" in sql
     assert "usage.node" not in sql
+
+
+def test_build_xdmod_usage_query_selects_wall_hours_and_type_columns() -> None:
+    sql = build_xdmod_usage_query(date(2025, 12, 15), TEST_SETTINGS)
+
+    assert "sumIf(usage.usage, usage.resource = 'wall') AS wall_hours" in sql
+    assert "'wall'" in sql.split("WHERE", 1)[1]
+    # The GROUP BY is on pod, not on gpu_model_name or raw_resource, so the type
+    # columns need conditional aggregates.
+    # uniqExactIf rather than countDistinctIf: countDistinct is an alias for
+    # uniqExact, and ClickHouse combinators are not guaranteed on aliases.
+    assert (
+        "uniqExactIf(usage.gpu_model_name, usage.resource = 'gpu') AS gpu_model_count" in sql
+    )
+    assert "anyIf(usage.gpu_model_name, usage.resource = 'gpu') AS gpu_model_name" in sql
+    assert "anyIf(usage.raw_resource, usage.resource = 'fpga') AS fpga_raw_resource" in sql
 
 
 def test_fetch_xdmod_usage_records_maps_clickhouse_rows_to_payload() -> None:
@@ -110,11 +133,15 @@ def test_fetch_xdmod_usage_records_maps_clickhouse_rows_to_payload() -> None:
                 "pod-uid-1",
                 "trainer-0",
                 "Delta University",
-                Decimal("24.500000"),
-                Decimal("2.000000"),
+                Decimal("96.000000"),  # cpu_hours: 4 cores for 24h
+                Decimal("24.000000"),  # gpu_hours: 1 gpu for 24h
                 Decimal("0.000000"),
                 Decimal("0.000000"),
                 Decimal("12.250000"),
+                Decimal("24.000000"),  # wall_hours
+                1,
+                "a100",
+                "",
             )
         ]
     )
@@ -131,15 +158,92 @@ def test_fetch_xdmod_usage_records_maps_clickhouse_rows_to_payload() -> None:
         "Account": "analytics",
         "RecordStartTime": "2025-12-15 00:00:00",
         "RecordEndTime": "2025-12-15 23:59:59",
-        "CPU": 24.5,
+        "WallHours": 24,
+        "CPU": 4,
         "CPUType": "",
-        "GPU": 2,
-        "GPUType": "",
+        "CPUHours": 96,
+        "GPU": 1,
+        "GPUType": "a100",
+        "GPUHours": 24,
         "FPGA": 0,
         "FPGAType": "",
         "Mem": 1,
         "Storage": 12.25,
     }
+
+
+def test_pod_holding_four_gpus_for_six_hours_reports_count_and_hours_separately() -> None:
+    record = _record(
+        wall_hours=Decimal("6.000000"),
+        cpu_hours=Decimal("48.000000"),
+        gpu_hours=Decimal("24.000000"),
+        gpu_model_count=1,
+        gpu_model_name="a100",
+    )
+
+    payload = record.to_payload()
+
+    assert payload["WallHours"] == 6
+    assert payload["GPU"] == 4
+    assert payload["GPUHours"] == 24
+    assert payload["CPU"] == 8
+    assert payload["CPUHours"] == 48
+
+
+def test_gpu_type_is_mixed_when_a_pod_spans_several_models() -> None:
+    record = _record(gpu_model_count=2, gpu_model_name="a100")
+
+    assert record.to_payload()["GPUType"] == "mixed"
+
+
+def test_gpu_type_is_blank_when_the_pod_used_no_gpu() -> None:
+    record = _record(gpu_hours=Decimal("0.000000"), gpu_model_count=0, gpu_model_name="")
+
+    assert record.to_payload()["GPUType"] == ""
+
+
+def test_fpga_type_comes_from_the_raw_resource_label() -> None:
+    record = _record(
+        fpga=Decimal("12.000000"),
+        fpga_raw_resource="amd_com_xilinx_u55c",
+    )
+
+    assert record.to_payload()["FPGAType"] == "amd_com_xilinx_u55c"
+
+
+def test_missing_wall_hours_falls_back_to_a_24_hour_day(caplog) -> None:
+    record = _record(
+        wall_hours=Decimal("0.000000"),
+        cpu_hours=Decimal("48.000000"),
+        gpu_hours=Decimal("0.000000"),
+    )
+
+    assert record.wall_hours_missing is True
+
+    with caplog.at_level("WARNING"):
+        payload = build_payload_records([record], date(2025, 12, 15))
+
+    assert payload[0]["WallHours"] == 24
+    assert payload[0]["CPU"] == 2
+    assert payload[0]["CPUHours"] == 48
+    assert "xdmod_upload_wall_hours_missing" in caplog.text
+
+
+def test_record_with_no_usage_at_all_does_not_warn(caplog) -> None:
+    record = _record(
+        wall_hours=Decimal("0.000000"),
+        cpu_hours=Decimal("0.000000"),
+        gpu_hours=Decimal("0.000000"),
+    )
+
+    assert record.wall_hours_missing is False
+
+    with caplog.at_level("WARNING"):
+        payload = build_payload_records([record], date(2025, 12, 15))
+
+    assert payload[0]["CPU"] == 0
+    assert payload[0]["GPU"] == 0
+    assert "xdmod_upload_wall_hours_missing" not in caplog.text
 
 
 def test_split_payload_batches_honors_record_limit() -> None:
@@ -217,6 +321,10 @@ def test_run_upload_for_date_dry_run_does_not_require_endpoint(capsys) -> None:
                 Decimal("0.000000"),
                 Decimal("2.000000"),
                 Decimal("0.000000"),
+                Decimal("24.000000"),
+                0,
+                "",
+                "",
             )
         ]
     )

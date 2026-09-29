@@ -26,8 +26,6 @@ spec:
             - "8000"
             - --root-path
             - /openapi
-            - --api-key
-            - $(MCPO_API_KEY)
             - --
             - python
             - -m

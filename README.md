@@ -203,10 +203,10 @@ The Argo application watches this repo at `apps/nrp-clickhouse/overlays/dev`. A 
 
 Files to customize before apply:
 
-- `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `MCPO_API_KEY`, `XDMOD_ENDPOINT`, and optional XDMod auth values
+- `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `XDMOD_ENDPOINT`, and optional XDMod auth values
 - `k8s/overlays/prod/kustomization.yaml`: set your pipeline image name/tag
 - `apps/nrp-clickhouse/overlays/dev/kustomization.yaml`: GitOps overlay watched by Argo CD; the image tag is updated by GitHub Actions
-- `apps/nrp-clickhouse/overlays/dev/sealed-secret.yaml`: encrypted ClickHouse and MCPO credentials for the `access-accounting` namespace
+- `apps/nrp-clickhouse/overlays/dev/sealed-secret.yaml`: encrypted ClickHouse credentials for the `access-accounting` namespace
 - `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, XDMod upload limits, and runtime tuning values
 
 Deployed components:
@@ -324,11 +324,10 @@ python3 -m nrp_accounting_pipeline.mcp_server --transport streamable-http --host
 Run as an OpenAPI-compatible server with `mcpo`:
 
 ```bash
-export MCPO_API_KEY="replace-me"
-mcpo --host 0.0.0.0 --port 8000 --root-path /openapi --api-key "$MCPO_API_KEY" -- python3 -m nrp_accounting_pipeline.mcp_server
+mcpo --host 0.0.0.0 --port 8000 --root-path /openapi -- python3 -m nrp_accounting_pipeline.mcp_server
 ```
 
-This exposes OpenAPI docs at `http://localhost:8000/openapi/docs`.
+This exposes OpenAPI docs at `http://localhost:8000/openapi/docs`. The usage data is public, so the bridge runs without an API key, matching the unauthenticated MCP endpoint.
 
 Available tools:
 

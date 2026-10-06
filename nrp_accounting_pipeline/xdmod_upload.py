@@ -4,14 +4,15 @@ import argparse
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 from urllib.parse import urlsplit
 
-from .aggregation import GPU_MODEL_MIXED
+from .aggregation import DECIMAL_BYTES_PER_GB, GPU_MODEL_MIXED
 from .config import Settings, get_settings
 from .logging_config import configure_logging
 from .schema import NAMESPACE_METADATA_TABLE_NAME, POD_TABLE_NAME, table_qualified_name
@@ -25,6 +26,17 @@ FALLBACK_WALL_HOURS = Decimal("24")
 # Device counts are ratios of Decimal(18, 6) values; match that precision so an
 # exact request serializes as an integer rather than 3.999999.
 _COUNT_QUANTUM = Decimal("0.000001")
+# Mem/Storage are reported to XDMod in bytes so it can pick the display unit.
+# ClickHouse stores them as gb-hours built with aggregation's decimal GB, so
+# this constant undoes exactly that conversion.
+_BYTES_PER_GB = Decimal(int(DECIMAL_BYTES_PER_GB))
+_BYTE_QUANTUM = Decimal("1")
+# ACCESS-allocated namespaces are named nrp-<allocation>, where an ACCESS
+# allocation is a three-letter field code plus six digits (e.g. agr260006).
+_ACCESS_ALLOCATION_NAMESPACE = re.compile(r"nrp-([a-z]{3}\d{6})")
+# Prefix XDMoD expects on every non-ACCESS account, so those can never collide
+# with an ACCESS allocation name.
+_NON_ACCESS_ACCOUNT_PREFIX = "nrp-"
 
 try:
     import requests
@@ -39,8 +51,14 @@ class XdmodUploadSettings:
     auth_value: str | None
     timeout_seconds: float
     retry_limit: int
-    max_records_per_post: int
-    max_bytes_per_post: int
+
+
+def xdmod_account(namespace: str) -> str:
+    """XDMoD account for a namespace: the bare ACCESS allocation, else nrp-<namespace>."""
+    match = _ACCESS_ALLOCATION_NAMESPACE.fullmatch(namespace)
+    if match:
+        return match.group(1)
+    return f"{_NON_ACCESS_ACCOUNT_PREFIX}{namespace}"
 
 
 @dataclass(frozen=True)
@@ -54,9 +72,9 @@ class XdmodUsageRecord:
     wall_hours: Decimal
     cpu_hours: Decimal
     gpu_hours: Decimal
-    fpga: Decimal
-    mem: Decimal
-    storage: Decimal
+    fpga_hours: Decimal
+    mem_gb_hours: Decimal
+    storage_gb_hours: Decimal
     gpu_model_count: int
     gpu_model_name: str
     fpga_raw_resource: str
@@ -79,11 +97,19 @@ class XdmodUsageRecord:
             return FALLBACK_WALL_HOURS
         return Decimal("0")
 
-    def _device_count(self, device_hours: Decimal) -> Decimal:
+    def _allocated_devices(self, device_hours: Decimal) -> Decimal:
+        """Devices the pod held: device-hours spread back over its wall hours."""
         wall_hours = self.effective_wall_hours()
         if wall_hours <= 0:
             return Decimal("0")
         return (device_hours / wall_hours).quantize(_COUNT_QUANTUM)
+
+    def _allocated_bytes(self, gb_hours: Decimal) -> Decimal:
+        """Bytes the pod held, as a whole number; XDMod scales it for display."""
+        wall_hours = self.effective_wall_hours()
+        if wall_hours <= 0:
+            return Decimal("0")
+        return (gb_hours * _BYTES_PER_GB / wall_hours).quantize(_BYTE_QUANTUM)
 
     @property
     def gpu_type(self) -> str:
@@ -98,20 +124,20 @@ class XdmodUsageRecord:
             "NumberOfContainers": 1,
             "User": self.user,
             "UserOrganization": self.user_organization,
-            "Account": self.account,
+            "Account": xdmod_account(self.account),
             "RecordStartTime": f"{self.record_date.isoformat()} 00:00:00",
             "RecordEndTime": f"{self.record_date.isoformat()} 23:59:59",
             "WallHours": _json_number(self.effective_wall_hours()),
-            "CPU": _json_number(self._device_count(self.cpu_hours)),
+            "CPU": _json_number(self._allocated_devices(self.cpu_hours)),
             "CPUType": "",
             "CPUHours": _json_number(self.cpu_hours),
-            "GPU": _json_number(self._device_count(self.gpu_hours)),
+            "GPU": _json_number(self._allocated_devices(self.gpu_hours)),
             "GPUType": self.gpu_type,
             "GPUHours": _json_number(self.gpu_hours),
-            "FPGA": _json_number(self.fpga),
+            "FPGA": _json_number(self._allocated_devices(self.fpga_hours)),
             "FPGAType": self.fpga_raw_resource,
-            "Mem": _json_number(self.mem if self.mem > 0 else Decimal("1")),
-            "Storage": _json_number(self.storage if self.storage > 0 else Decimal("1")),
+            "Mem": _json_number(self._allocated_bytes(self.mem_gb_hours)),
+            "Storage": _json_number(self._allocated_bytes(self.storage_gb_hours)),
         }
 
 
@@ -203,8 +229,6 @@ def get_xdmod_upload_settings() -> XdmodUploadSettings:
         auth_value=auth_value,
         timeout_seconds=_env_float("XDMOD_UPLOAD_TIMEOUT_SECONDS", 60.0),
         retry_limit=max(1, _env_int("XDMOD_UPLOAD_RETRY_LIMIT", 3)),
-        max_records_per_post=max(1, _env_int("XDMOD_MAX_RECORDS_PER_POST", 5000)),
-        max_bytes_per_post=max(1, _env_int("XDMOD_MAX_BYTES_PER_POST", 5_000_000)),
     )
 
 
@@ -286,9 +310,9 @@ def fetch_xdmod_usage_records(
             user_organization=str(row[5] or "Unknown"),
             cpu_hours=_to_decimal(row[6]),
             gpu_hours=_to_decimal(row[7]),
-            fpga=_to_decimal(row[8]),
-            mem=_to_decimal(row[9]),
-            storage=_to_decimal(row[10]),
+            fpga_hours=_to_decimal(row[8]),
+            mem_gb_hours=_to_decimal(row[9]),
+            storage_gb_hours=_to_decimal(row[10]),
             wall_hours=_to_decimal(row[11]),
             gpu_model_count=int(row[12] or 0),
             gpu_model_name=str(row[13] or ""),
@@ -308,49 +332,20 @@ def _serialize_payload(records: Sequence[dict[str, object]]) -> bytes:
     return json.dumps(records, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def split_payload_batches(
-    records: Sequence[dict[str, object]],
-    *,
-    max_records_per_post: int,
-    max_bytes_per_post: int,
-) -> Iterable[list[dict[str, object]]]:
-    batch: list[dict[str, object]] = []
-
-    for record in records:
-        record_size = len(_serialize_payload([record]))
-        if record_size > max_bytes_per_post:
-            raise ValueError(
-                "A single XDMod record exceeds XDMOD_MAX_BYTES_PER_POST; increase the limit"
-            )
-
-        candidate = [*batch, record]
-        candidate_size = len(_serialize_payload(candidate))
-
-        if batch and (
-            len(candidate) > max_records_per_post or candidate_size > max_bytes_per_post
-        ):
-            yield batch
-            batch = [record]
-        else:
-            batch = candidate
-
-    if batch:
-        yield batch
-
-
 def _request_headers(settings: XdmodUploadSettings) -> dict[str, str]:
-    headers = {"Content-Type": "application/json"}
+    # No Content-Type: requests sets it with the multipart boundary.
+    headers: dict[str, str] = {}
     if settings.auth_header and settings.auth_value:
         headers[settings.auth_header] = settings.auth_value
     return headers
 
 
-def _post_batch(
+def _post_file(
     session,
-    batch: Sequence[dict[str, object]],
+    filename: str,
+    body: bytes,
     settings: XdmodUploadSettings,
 ) -> int:
-    body = _serialize_payload(batch)
     headers = _request_headers(settings)
 
     for attempt in range(1, settings.retry_limit + 1):
@@ -358,56 +353,17 @@ def _post_batch(
         try:
             response = session.post(
                 settings.endpoint,
-                data=body,
+                files={"file": (filename, body, "application/json")},
                 headers=headers,
                 timeout=settings.timeout_seconds,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "xdmod_upload_post_failed",
-                extra={
-                    "attempt": attempt,
-                    "record_count": len(batch),
-                    "payload_bytes": len(body),
-                    "duration_seconds": round(time.monotonic() - start_time, 3),
-                    "error": str(exc),
-                },
-            )
-            if attempt >= settings.retry_limit:
-                raise
-
-            sleep_seconds = min(2 ** (attempt - 1), 30)
-            logger.info(
-                "xdmod_upload_post_retrying",
-                extra={"attempt": attempt, "retry_in_seconds": sleep_seconds},
-            )
-            time.sleep(sleep_seconds)
-            continue
-
-        if response.status_code == 413 and len(batch) > 1:
-            midpoint = len(batch) // 2
-            logger.warning(
-                "xdmod_upload_batch_too_large_splitting",
-                extra={
-                    "attempt": attempt,
-                    "record_count": len(batch),
-                    "payload_bytes": len(body),
-                },
-            )
-            return _post_batch(session, batch[:midpoint], settings) + _post_batch(
-                session,
-                batch[midpoint:],
-                settings,
-            )
-
-        try:
             response.raise_for_status()
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "xdmod_upload_post_failed",
                 extra={
                     "attempt": attempt,
-                    "record_count": len(batch),
+                    "upload_filename": filename,
                     "payload_bytes": len(body),
                     "duration_seconds": round(time.monotonic() - start_time, 3),
                     "error": str(exc),
@@ -428,7 +384,7 @@ def _post_batch(
             "xdmod_upload_post_complete",
             extra={
                 "attempt": attempt,
-                "record_count": len(batch),
+                "upload_filename": filename,
                 "payload_bytes": len(body),
                 "duration_seconds": round(time.monotonic() - start_time, 3),
                 "status_code": response.status_code,
@@ -444,28 +400,33 @@ def upload_xdmod_records(
     *,
     upload_settings: XdmodUploadSettings | None = None,
     session: Any = None,
+    target_date: date | None = None,
 ) -> int:
     if requests is None and session is None:
         raise RuntimeError("requests is not installed. Install dependencies to upload to XDMod.")
 
-    payload_records = build_payload_records(records)
+    payload_records = build_payload_records(records, target_date)
     if not payload_records:
         logger.info("xdmod_upload_skipped_no_records")
         return 0
 
     active_upload_settings = upload_settings or get_xdmod_upload_settings()
     client = session or requests.Session()
-    post_count = 0
-    for batch in split_payload_batches(
-        payload_records,
-        max_records_per_post=active_upload_settings.max_records_per_post,
-        max_bytes_per_post=active_upload_settings.max_bytes_per_post,
-    ):
-        post_count += _post_batch(client, batch, active_upload_settings)
+
+    record_date = target_date or records[0].record_date
+    filename = f"nrp-usage-{record_date.isoformat()}.json"
+    body = _serialize_payload(payload_records)
+
+    post_count = _post_file(client, filename, body, active_upload_settings)
 
     logger.info(
         "xdmod_upload_complete",
-        extra={"record_count": len(payload_records), "post_count": post_count},
+        extra={
+            "record_count": len(payload_records),
+            "payload_bytes": len(body),
+            "upload_filename": filename,
+            "post_count": post_count,
+        },
     )
     return post_count
 
@@ -523,6 +484,7 @@ def run_upload_for_date(
         records,
         upload_settings=upload_settings,
         session=session,
+        target_date=target_date,
     )
     return XdmodUploadResult(
         date=target_date,

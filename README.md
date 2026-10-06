@@ -166,11 +166,9 @@ export QUERY_STEP="1h"
 export RETRY_LIMIT=4
 export PORTAL_TIMEOUT_SECONDS=60
 export INSTITUTION_CSV_URL="https://raw.githubusercontent.com/djw8605/nrp-ror-labeler/refs/heads/main/node-institution.csv"
-export XDMOD_ENDPOINT="https://xdmod.example.org/usage"
+export XDMOD_ENDPOINT="https://data.ccr.xdmod.org/resource-manager-logs"
 export XDMOD_AUTH_HEADER="Authorization"
 export XDMOD_AUTH_VALUE="Bearer ..."
-export XDMOD_MAX_RECORDS_PER_POST=5000
-export XDMOD_MAX_BYTES_PER_POST=5000000
 ```
 
 `CLICKHOUSE_HOST` supports `host` or `host:port`. If a port is embedded in `CLICKHOUSE_HOST`, it takes precedence over `CLICKHOUSE_PORT`.
@@ -282,11 +280,11 @@ Options:
 python xdmod_upload.py --date 2026-03-13
 ```
 
-The XDMod uploader reads already-ingested `cluster_pod_usage_daily` rows from ClickHouse, joins `namespace_metadata_mapping` for the namespace institution, and POSTs one JSON array of daily pod records to `XDMOD_ENDPOINT`.
+The XDMod uploader reads already-ingested `cluster_pod_usage_daily` rows from ClickHouse, joins `namespace_metadata_mapping` for the namespace institution, and uploads one JSON array of daily pod records to `XDMOD_ENDPOINT` as a multipart file named `nrp-usage-<date>.json` (the `file` field, as XDMod's resource-manager-logs endpoint expects). `XDMOD_AUTH_HEADER`/`XDMOD_AUTH_VALUE` carry the bearer token.
 
-Each record separates device counts from device hours: `CPU` and `GPU` are the devices the pod held, computed as `CPUHours / WallHours` and `GPUHours / WallHours`, while `CPUHours` and `GPUHours` are the core-hours and gpu-hours stored in ClickHouse. `WallHours` comes from `resource='wall'`. `GPUType` is the pod's GPU model, or `mixed` when a pod spans several; `CPUType` is always empty because no CPU model data is collected. `Mem` and `Storage` remain GB-hours, and `NumberOfContainers` is always `1`.
+Each record separates device counts from device hours: `CPU` and `GPU` are the devices the pod held, computed as `CPUHours / WallHours` and `GPUHours / WallHours`, while `CPUHours` and `GPUHours` are the core-hours and gpu-hours stored in ClickHouse. `WallHours` comes from `resource='wall'`. `GPUType` is the pod's GPU model, or `mixed` when a pod spans several; `CPUType` is always empty because no CPU model data is collected. `FPGA` is the device count, divided out of the stored resource-hours the same way as `CPU` and `GPU`. `Mem` and `Storage` are the bytes allocated: the stored gb-hours divided by `WallHours` and converted back to bytes (1 GB = 10^9, matching the ETL's own conversion), rounded to a whole byte so XDMod can render whatever unit it prefers. A pod that requested nothing reports `0`. `NumberOfContainers` is always `1`. `Account` is the bare ACCESS allocation for ACCESS namespaces (`nrp-agr260006` → `agr260006`, matched as `nrp-` plus three letters and six digits) and `nrp-<namespace>` for everything else (`unl-weitzel` → `nrp-unl-weitzel`), so non-ACCESS accounts can never collide with an allocation name.
 
-Dates ingested before 2026-07-28 have no `wall` rows. The uploader falls back to a 24-hour day for those and logs `xdmod_upload_wall_hours_missing` with the date and affected pod count, so `CPU` and `GPU` read as an average over the day rather than a true count until the date is re-run with `etl.py --force`. If the payload exceeds `XDMOD_MAX_RECORDS_PER_POST` or `XDMOD_MAX_BYTES_PER_POST`, it is split into multiple POSTs. An HTTP `413` response also causes the current batch to be split and retried.
+Dates ingested before 2026-07-28 have no `wall` rows. The uploader falls back to a 24-hour day for those and logs `xdmod_upload_wall_hours_missing` with the date and affected pod count, so `CPU` and `GPU` read as an average over the day rather than a true count until the date is re-run with `etl.py --force`. The whole day goes up as a single request, retried per `XDMOD_UPLOAD_RETRY_LIMIT` with exponential backoff.
 
 The Kubernetes uploader is intentionally a separate CronJob from `nrp-accounting-etl`, scheduled later in the morning. Its success or failure does not change Prometheus-to-ClickHouse ingestion.
 

@@ -307,15 +307,22 @@ def attach_gpu_model_names_to_resource_payload(
     return enriched_payload
 
 
+def daily_subquery_timestamp(end_ts: datetime) -> int:
+    """`@` timestamp for the daily [1d:5m] subqueries that end at `end_ts` (midnight).
+
+    Range selectors include both endpoints, so a [1d:5m] subquery anchored at
+    midnight returns 289 samples: a full day reads 24.083 hours and the midnight
+    sample is billed to both days.  One second earlier gives exactly 288.
+    """
+    return int(end_ts.timestamp()) - 1
+
+
 def _query_allocated_resources(
     *,
     end_ts: datetime,
     settings: Settings,
 ) -> dict[str, dict[str, Any]]:
-    # Range selectors include both endpoints, so a [1d:5m] subquery anchored at
-    # midnight returns 289 samples: a full day reads 24.083 hours and the
-    # midnight sample is billed to both days.  One second earlier gives 288.
-    end_timestamp = int(end_ts.timestamp()) - 1
+    end_timestamp = daily_subquery_timestamp(end_ts)
     resource_query = POD_RESOURCE_REQUESTS_QUERY_TEMPLATE.format(end_ts=end_timestamp)
     resource_payload = query_prometheus(
         resource_query,

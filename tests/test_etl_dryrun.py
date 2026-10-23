@@ -38,6 +38,7 @@ from nrp_accounting_pipeline.etl import (
     POD_WALL_HOURS_QUERY_TEMPLATE,
     attach_node_labels_to_payload,
     attach_pod_annotations_to_resource_payload,
+    daily_subquery_timestamp,
 )
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,8 @@ _END_TS = int(
     ).timestamp()
     + 86400
 )
+# The [1d:5m] subqueries anchor one second before midnight, as the ETL does.
+_SUBQUERY_TS = daily_subquery_timestamp(datetime.fromtimestamp(_END_TS, tz=timezone.utc))
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,9 +86,9 @@ def _instant_query(query: str) -> dict[str, Any]:
 def _fetch_allocated_resources() -> dict[str, Any]:
     """Run the production ETL query against real Prometheus."""
     resource_payload = _instant_query(
-        POD_RESOURCE_REQUESTS_QUERY_TEMPLATE.format(end_ts=_END_TS)
+        POD_RESOURCE_REQUESTS_QUERY_TEMPLATE.format(end_ts=_SUBQUERY_TS)
     )
-    annotations_payload = _instant_query(POD_ANNOTATIONS_QUERY_TEMPLATE.format(end_ts=_END_TS))
+    annotations_payload = _instant_query(POD_ANNOTATIONS_QUERY_TEMPLATE.format(end_ts=_SUBQUERY_TS))
     return attach_pod_annotations_to_resource_payload(resource_payload, annotations_payload)
 
 
@@ -399,7 +402,7 @@ def test_normalize_resource(raw, expected):
 
 def test_live_wall_hours_query_returns_plausible_pod_hours() -> None:
     """Every pod's wall hours must fall inside a single day."""
-    payload = _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_END_TS))
+    payload = _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_SUBQUERY_TS))
     series = payload["data"]["result"]
 
     assert series, "no Running pods found for the target date"
@@ -414,7 +417,7 @@ def test_live_wall_hours_query_returns_plausible_pod_hours() -> None:
 
 
 def test_live_wall_hours_aggregate_to_the_wall_resource() -> None:
-    payload = _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_END_TS))
+    payload = _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_SUBQUERY_TS))
     resource_payload = _get_live_payload()
 
     enriched = attach_node_labels_to_payload(payload, resource_payload)
@@ -432,7 +435,7 @@ def test_live_wall_hours_aggregate_to_the_wall_resource() -> None:
 def test_live_cpu_hours_divided_by_wall_hours_yields_a_plausible_core_count() -> None:
     """The ratio that becomes the XDMoD CPU field must look like a core count."""
     wall_payload = attach_node_labels_to_payload(
-        _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_END_TS)),
+        _instant_query(POD_WALL_HOURS_QUERY_TEMPLATE.format(end_ts=_SUBQUERY_TS)),
         _get_live_payload(),
     )
     rows = aggregate_daily_metrics(

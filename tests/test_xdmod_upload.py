@@ -113,11 +113,21 @@ def test_build_xdmod_usage_query_selects_wall_hours_and_type_columns() -> None:
     # columns need conditional aggregates.
     # uniqExactIf rather than countDistinctIf: countDistinct is an alias for
     # uniqExact, and ClickHouse combinators are not guaranteed on aliases.
+    # Types only come from rows with usage: pods that request `nvidia.com/gpu: 0`
+    # still get a gpu row (usage 0, model taken from the node), which must not
+    # set GPUType or count toward a mixed model.
     assert (
-        "uniqExactIf(usage.gpu_model_name, usage.resource = 'gpu') AS gpu_model_count" in sql
+        "uniqExactIf(usage.gpu_model_name, usage.resource = 'gpu' AND usage.usage > 0)"
+        " AS gpu_model_count" in sql
     )
-    assert "anyIf(usage.gpu_model_name, usage.resource = 'gpu') AS gpu_model_name" in sql
-    assert "anyIf(usage.raw_resource, usage.resource = 'fpga') AS fpga_raw_resource" in sql
+    assert (
+        "anyIf(usage.gpu_model_name, usage.resource = 'gpu' AND usage.usage > 0)"
+        " AS gpu_model_name" in sql
+    )
+    assert (
+        "anyIf(usage.raw_resource, usage.resource = 'fpga' AND usage.usage > 0)"
+        " AS fpga_raw_resource" in sql
+    )
 
 
 def test_fetch_xdmod_usage_records_maps_clickhouse_rows_to_payload() -> None:

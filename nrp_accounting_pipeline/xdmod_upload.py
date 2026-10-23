@@ -239,6 +239,10 @@ def build_xdmod_usage_query(target_date: date, settings: Settings) -> str:
         NAMESPACE_METADATA_TABLE_NAME,
     )
     date_literal = _sql_string_literal(target_date.isoformat())
+    # Device types come only from rows with usage.  Pods that request
+    # `nvidia.com/gpu: 0` (e.g. JupyterHub CPU profiles) still get a zero gpu row
+    # whose model is taken from the node; it must not set GPUType or make a pod
+    # look like it spans several models.
 
     return f"""
 SELECT
@@ -254,9 +258,9 @@ SELECT
     sumIf(usage.usage, usage.resource = 'memory') AS mem,
     sumIf(usage.usage, usage.resource = 'storage') AS storage,
     sumIf(usage.usage, usage.resource = 'wall') AS wall_hours,
-    uniqExactIf(usage.gpu_model_name, usage.resource = 'gpu') AS gpu_model_count,
-    anyIf(usage.gpu_model_name, usage.resource = 'gpu') AS gpu_model_name,
-    anyIf(usage.raw_resource, usage.resource = 'fpga') AS fpga_raw_resource
+    uniqExactIf(usage.gpu_model_name, usage.resource = 'gpu' AND usage.usage > 0) AS gpu_model_count,
+    anyIf(usage.gpu_model_name, usage.resource = 'gpu' AND usage.usage > 0) AS gpu_model_name,
+    anyIf(usage.raw_resource, usage.resource = 'fpga' AND usage.usage > 0) AS fpga_raw_resource
 FROM {pod_table} AS usage
 LEFT JOIN {metadata_table} AS meta ON usage.namespace = meta.namespace
 WHERE usage.date = toDate({date_literal})

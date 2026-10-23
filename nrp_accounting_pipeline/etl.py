@@ -312,7 +312,10 @@ def _query_allocated_resources(
     end_ts: datetime,
     settings: Settings,
 ) -> dict[str, dict[str, Any]]:
-    end_timestamp = int(end_ts.timestamp())
+    # Range selectors include both endpoints, so a [1d:5m] subquery anchored at
+    # midnight returns 289 samples: a full day reads 24.083 hours and the
+    # midnight sample is billed to both days.  One second earlier gives 288.
+    end_timestamp = int(end_ts.timestamp()) - 1
     resource_query = POD_RESOURCE_REQUESTS_QUERY_TEMPLATE.format(end_ts=end_timestamp)
     resource_payload = query_prometheus(
         resource_query,

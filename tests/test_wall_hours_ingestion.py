@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 from nrp_accounting_pipeline.aggregation import (
     aggregate_daily_metrics,
@@ -10,8 +11,10 @@ from nrp_accounting_pipeline.aggregation import (
     normalize_resource,
     resource_unit,
 )
+from nrp_accounting_pipeline import etl
 from nrp_accounting_pipeline.etl import (
     POD_WALL_HOURS_QUERY_TEMPLATE,
+    _query_allocated_resources,
     attach_node_labels_to_payload,
 )
 
@@ -24,6 +27,29 @@ def test_wall_hours_query_collapses_duplicate_kube_state_metrics_series() -> Non
         '(kube_pod_status_phase{phase="Running"} == 1)'
         ")[1d:5m]@1769040000)"
     )
+
+
+def test_daily_subqueries_end_one_second_before_midnight(monkeypatch) -> None:
+    # Range selectors include both ends, so [1d:5m] anchored at midnight returns
+    # 289 samples: a full day reads 24.083 wall hours and the midnight sample is
+    # billed to both days.  Anchoring one second earlier yields exactly 288.
+    queries: list[str] = []
+
+    def fake_query_prometheus(query, **_kwargs):
+        queries.append(query)
+        return {"data": {"result": []}}
+
+    monkeypatch.setattr(etl, "query_prometheus", fake_query_prometheus)
+    midnight = datetime(2026, 1, 22, tzinfo=timezone.utc)
+
+    _query_allocated_resources(
+        end_ts=midnight,
+        settings=SimpleNamespace(PROMETHEUS_TIMEOUT_SECONDS=1, RETRY_LIMIT=1),
+    )
+
+    expected_anchor = f"@{int(midnight.timestamp()) - 1})"
+    assert len(queries) == 4
+    assert all(query.endswith(expected_anchor) for query in queries), queries
 
 
 def test_phase_metric_normalizes_to_wall_resource() -> None:

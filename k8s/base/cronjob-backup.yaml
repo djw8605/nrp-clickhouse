@@ -187,8 +187,8 @@ spec:
                   rclone copy "${ARCHIVE}" "gcs:nrp-aime/clickhouse-backups"
                   echo "==> Done: ch-backup-${BACKUP_DATE}.tar.gz"
 
-                  # Keep only 14 most recent backups in GCS
-                  rclone ls "gcs:nrp-aime/clickhouse-backups" \
+                  # Keep only the 14 most recent backups in GCS. The names carry the date, so sort by name:
+                  # sorted `rclone ls` lines start with the size, which deleted each new, smaller archive.
+                  rclone lsf --files-only --include 'ch-backup-*.tar.gz' "gcs:nrp-aime/clickhouse-backups" \
                     | sort | head -n -14 \
-                    | awk '{print $2}' \
-                    | xargs -I{} rclone deletefile "gcs:nrp-aime/clickhouse-backups/{}" || true
+                    | xargs -r -I{} rclone deletefile "gcs:nrp-aime/clickhouse-backups/{}" || true

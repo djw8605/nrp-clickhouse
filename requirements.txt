@@ -3,3 +3,7 @@ requests>=2.31.0
 cityhash>=0.4.7
 mcp[cli]>=1.0.0,<2.0.0
 mcpo>=0.0.20,<1.0.0
+# mcpo 0.0.20 passes ssl_certfile/ssl_keyfile to FastAPI(), which FastAPI 0.162.1 rejects,
+# so the OpenAPI bridge crashes at startup. 0.142.2 is what the last working image had.
+# Remove this pin once a newer mcpo stops passing those arguments.
+fastapi==0.142.2

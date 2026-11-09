@@ -32,6 +32,16 @@ spec:
                 name: nrp-accounting-config
             - secretRef:
                 name: nrp-accounting-secrets
+          # Read-only ClickHouse user. env wins over envFrom, so this replaces the
+          # writer credentials from nrp-accounting-secrets.
+          env:
+            - name: CLICKHOUSE_USER
+              value: accounting_ro
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-readonly-credentials
+                  key: password
           ports:
             - name: http
               containerPort: 8000

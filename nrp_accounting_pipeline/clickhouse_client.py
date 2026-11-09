@@ -85,22 +85,27 @@ def _retry_with_backoff(
     raise RuntimeError(f"Operation unexpectedly failed: {operation_name}")
 
 
-def connect_clickhouse(settings: Settings | None = None):
+def _get_client(settings: Settings, database: str):
     if clickhouse_connect is None:
         raise RuntimeError(
-            "clickhouse-connect is not installed. Install dependencies before running ETL writes."
+            "clickhouse-connect is not installed. Install dependencies before connecting to ClickHouse."
         )
 
+    return clickhouse_connect.get_client(
+        host=settings.CLICKHOUSE_HOST,
+        port=settings.CLICKHOUSE_PORT,
+        username=settings.CLICKHOUSE_USER,
+        password=settings.CLICKHOUSE_PASSWORD,
+        secure=settings.CLICKHOUSE_SECURE,
+        database=database,
+    )
+
+
+def connect_clickhouse(settings: Settings | None = None):
+    """Connect for the writers (ETL, backfill, institution import), creating the database first."""
     active_settings = settings or get_settings()
 
-    bootstrap_client = clickhouse_connect.get_client(
-        host=active_settings.CLICKHOUSE_HOST,
-        port=active_settings.CLICKHOUSE_PORT,
-        username=active_settings.CLICKHOUSE_USER,
-        password=active_settings.CLICKHOUSE_PASSWORD,
-        secure=active_settings.CLICKHOUSE_SECURE,
-        database="default",
-    )
+    bootstrap_client = _get_client(active_settings, "default")
     bootstrap_client.command(
         create_database_sql(
             active_settings.CLICKHOUSE_DATABASE, active_settings.CLICKHOUSE_CLUSTER
@@ -108,14 +113,17 @@ def connect_clickhouse(settings: Settings | None = None):
     )
     bootstrap_client.close()
 
-    return clickhouse_connect.get_client(
-        host=active_settings.CLICKHOUSE_HOST,
-        port=active_settings.CLICKHOUSE_PORT,
-        username=active_settings.CLICKHOUSE_USER,
-        password=active_settings.CLICKHOUSE_PASSWORD,
-        secure=active_settings.CLICKHOUSE_SECURE,
-        database=active_settings.CLICKHOUSE_DATABASE,
-    )
+    return _get_client(active_settings, active_settings.CLICKHOUSE_DATABASE)
+
+
+def connect_clickhouse_readonly(settings: Settings | None = None):
+    """Connect for the readers (MCP server, OpenAPI bridge, XDMoD upload) without touching the schema.
+
+    These log in as a readonly=1 user, and ClickHouse rejects every DDL statement from
+    such a user, even CREATE ... IF NOT EXISTS. The ETL owns the schema.
+    """
+    active_settings = settings or get_settings()
+    return _get_client(active_settings, active_settings.CLICKHOUSE_DATABASE)
 
 
 def create_tables_if_not_exist(client, settings: Settings | None = None) -> None:

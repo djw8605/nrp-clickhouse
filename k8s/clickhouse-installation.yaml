@@ -102,11 +102,17 @@ spec:
       grafana_ro/constraints/max_execution_time/max: "600"
       grafana_ro/constraints/max_execution_time/changeable_in_readonly: ""
       grafana_ro/constraints/parallel_replicas_for_cluster_engines/changeable_in_readonly: ""
+      # Read-only profile for this repo's read paths: the public MCP server, the
+      # OpenAPI bridge and the XDMoD upload. Their slowest query in two weeks took
+      # 5.6 s, so 60 s stops a runaway query without cutting off real ones.
+      accounting_ro/profile: default
+      accounting_ro/readonly: "1"
+      accounting_ro/max_execution_time: "60"
     users:
       # `default` has no password and full admin rights, so it gets no extra
       # networks here: the operator only allows it from localhost and the
       # ClickHouse pods themselves. Do not widen it; clients use their own
-      # users (`aime`, `grafana_ro`).
+      # users (`aime` for writers, `accounting_ro` and `grafana_ro` for readers).
       aime/networks/ip:
         - 0.0.0.0/0
       # Do not commit real credentials. Set this out-of-band (e.g. a sealed secret /
@@ -126,6 +132,22 @@ spec:
       # SHA-256 hex of the password in the monitoring/clickhouse-grafana-ro secret
       # (a SealedSecret in nrp/grafana).
       grafana_ro/password_sha256_hex: REPLACE_WITH_SHA256_HEX
+      # Read-only user for the MCP server, OpenAPI bridge and XDMoD upload, which
+      # read access_accounting and never write. The MCP server is public and
+      # unauthenticated, so it must not hold `aime`, which can write, run DDL and
+      # call url(). Its own user, not `grafana_ro`, keeps the password in this
+      # repo's secrets and its queries apart in system.query_log.
+      accounting_ro/profile: accounting_ro
+      accounting_ro/quota: default
+      accounting_ro/networks/ip:
+        - 10.244.0.0/16
+        - fdf0:17b3:c3ec:1f79:10::/108
+      accounting_ro/grants/query:
+        - GRANT SELECT ON access_accounting.*
+      # Do not commit real credentials. Set this out-of-band, like `aime`, to the
+      # SHA-256 hex of the password in the access-accounting/clickhouse-readonly-credentials
+      # secret (apps/nrp-clickhouse/overlays/dev/sealed-secret-ch-readonly-creds.yaml).
+      accounting_ro/password_sha256_hex: REPLACE_WITH_SHA256_HEX
   defaults:
     templates:
       dataVolumeClaimTemplate: ch-data

@@ -204,7 +204,8 @@ Files to customize before apply:
 - `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `XDMOD_ENDPOINT`, and optional XDMod auth values
 - `k8s/overlays/prod/kustomization.yaml`: set your pipeline image name/tag
 - `apps/nrp-clickhouse/overlays/dev/kustomization.yaml`: GitOps overlay watched by Argo CD; the image tag is updated by GitHub Actions
-- `apps/nrp-clickhouse/overlays/dev/sealed-secret.yaml`: encrypted ClickHouse credentials for the `access-accounting` namespace
+- `apps/nrp-clickhouse/overlays/dev/sealed-secret.yaml`: encrypted ClickHouse credentials for the `access-accounting` namespace (the `aime` writer user)
+- `apps/nrp-clickhouse/overlays/dev/sealed-secret-ch-readonly-creds.yaml`: encrypted password for the read-only `accounting_ro` user (see [ClickHouse Users](#clickhouse-users))
 - `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, XDMod upload limits, and runtime tuning values
 
 Deployed components:
@@ -445,6 +446,31 @@ The operator pod is not selected, so its own traffic is unchanged. Apply with:
 ```bash
 kubectl apply -n clickhouse -f k8s/clickhouse-networkpolicies.yaml
 ```
+
+### ClickHouse Users
+
+| User | Used by | Rights |
+|---|---|---|
+| `aime` | ETL, backfill, institution import, backup | read-write, DDL |
+| `accounting_ro` | MCP server, OpenAPI bridge, XDMoD upload | `readonly=1`, `SELECT ON access_accounting.*`, 60 s query limit |
+| `grafana_ro` | Grafana "NRP Clickhouse" data source | `readonly=1`, `SELECT` on `access_accounting.*` and `reporting.*` |
+
+The read paths log in as `accounting_ro` because the MCP server is public and unauthenticated. A `readonly=1` user cannot write, run DDL, change settings or call table functions such as `url()`. The MCP, OpenAPI and XDMoD manifests set `CLICKHOUSE_USER` and read `CLICKHOUSE_PASSWORD` from the `clickhouse-readonly-credentials` secret; `env` overrides the writer credentials that come in through `envFrom`. In code these paths connect with `connect_clickhouse_readonly`, which skips the `CREATE DATABASE` bootstrap: ClickHouse rejects any DDL from a read-only user, even `IF NOT EXISTS`, and the ETL owns the schema.
+
+Password hashes are set out-of-band, never committed. To rotate the `accounting_ro` password:
+
+```bash
+PW=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40)
+kubectl create secret generic clickhouse-readonly-credentials -n access-accounting \
+  --from-literal=password="$PW" --dry-run=client -o yaml \
+  | kubeseal --controller-namespace sealed-secrets-operator --controller-name sealed-secrets --format yaml \
+  > apps/nrp-clickhouse/overlays/dev/sealed-secret-ch-readonly-creds.yaml
+kubectl patch chi access-accounting -n clickhouse --type=merge \
+  -p "{\"spec\":{\"configuration\":{\"users\":{\"accounting_ro/password_sha256_hex\":\"$(printf '%s' "$PW" | shasum -a 256 | cut -d' ' -f1)\"}}}}"
+unset PW
+```
+
+Patch the hash before the new SealedSecret reaches the cluster. Otherwise the readers fail to log in until both sides match. Use `kubectl patch`, not `kubectl apply -f k8s/clickhouse-installation.yaml`: the file holds placeholder hashes and would overwrite the real ones.
 
 ### Database Schema
 

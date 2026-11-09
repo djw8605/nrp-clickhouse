@@ -448,10 +448,9 @@ def run_upload_for_date(
     active_settings = settings or get_settings()
 
     if clickhouse_client is None:
-        from .clickhouse_client import connect_clickhouse, create_tables_if_not_exist
+        from .clickhouse_client import connect_clickhouse_readonly
 
-        clickhouse_client = connect_clickhouse(active_settings)
-        create_tables_if_not_exist(clickhouse_client, active_settings)
+        clickhouse_client = connect_clickhouse_readonly(active_settings)
         managed_client = True
     else:
         managed_client = False

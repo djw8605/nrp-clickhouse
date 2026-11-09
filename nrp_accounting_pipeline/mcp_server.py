@@ -22,7 +22,7 @@ from .accounting_queries import (
     top_nodes_for_namespace as run_top_nodes_for_namespace,
     top_resource_consumers as run_top_resource_consumers,
 )
-from .clickhouse_client import connect_clickhouse
+from .clickhouse_client import connect_clickhouse_readonly
 from .config import Settings, get_settings
 
 try:
@@ -46,7 +46,7 @@ class AppContext:
 async def app_lifespan(server: Any) -> AsyncIterator[AppContext]:
     del server
     settings = get_settings()
-    client = connect_clickhouse(settings)
+    client = connect_clickhouse_readonly(settings)
     try:
         yield AppContext(client=client, settings=settings)
     finally:

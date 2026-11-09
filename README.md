@@ -204,7 +204,8 @@ Files to customize before apply:
 - `k8s/base/secret.yaml`: set `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `XDMOD_ENDPOINT`, and optional XDMod auth values
 - `k8s/overlays/prod/kustomization.yaml`: set your pipeline image name/tag
 - `apps/nrp-clickhouse/overlays/dev/kustomization.yaml`: GitOps overlay watched by Argo CD; the image tag is updated by GitHub Actions
-- `apps/nrp-clickhouse/overlays/dev/sealed-secret.yaml`: encrypted ClickHouse credentials for the `access-accounting` namespace
+- `apps/nrp-clickhouse/overlays/dev/sealed-secret.yaml`: encrypted ClickHouse credentials for the `access-accounting` namespace (the `aime` writer user)
+- `apps/nrp-clickhouse/overlays/dev/sealed-secret-ch-readonly-creds.yaml`: encrypted password for the read-only `accounting_ro` user (see [ClickHouse Users](#clickhouse-users))
 - `k8s/base/configmap.yaml`: adjust Prometheus URL, portal URL, XDMod upload limits, and runtime tuning values
 
 Deployed components:
@@ -217,6 +218,19 @@ Deployed components:
 - `Service/nrp-accounting-mcp`: cluster-internal service on port `8000`
 - `Service/nrp-accounting-openapi`: cluster-internal service on port `8000`
 - `Ingress/nrp-accounting-mcp`: external HAProxy ingress for `https://nrp-accounting-mcp.nrp-nautilus.io/`
+- `NetworkPolicy/nrp-accounting-*`: default-deny for this repo's pods, plus the flows each one needs (see below)
+
+Network policies:
+
+[k8s/base/networkpolicy.yaml](k8s/base/networkpolicy.yaml) selects only pods with `app.kubernetes.io/part-of: nrp-accounting`, so other workloads in the namespace are unaffected. Every pod from `k8s/base` gets that label through the kustomization's `labels` with `includeTemplates`; the standalone backfill Jobs set it themselves.
+
+| Component | Ingress | Egress |
+|---|---|---|
+| `mcp`, `openapi` | HAProxy ingress pods, port 8000 | ClickHouse 8123 |
+| `etl`, `xdmod-upload`, `backfill`, `pod-name-backfill` | none | ClickHouse 8123; HTTPS 443 to public addresses (Thanos and portal through the NRP ingress, GitHub raw, XDMoD) |
+| `backup` | none | ClickHouse 9000; HTTPS 443 to public addresses (GCS) |
+
+All of them can reach DNS. The query servers face the internet, so they cannot reach anything except ClickHouse. A new workload gets no traffic until it is added to `networkpolicy.yaml`. If it talks to ClickHouse, add it to the `clickhouse-server` ingress in [k8s/clickhouse-networkpolicies.yaml](k8s/clickhouse-networkpolicies.yaml) too. `tests/test_network_policies.py` fails when the two files disagree.
 
 The provided ingress follows the NRP HAProxy pattern:
 
@@ -418,6 +432,45 @@ Apply with:
 ```bash
 kubectl apply -f k8s/clickhouse-installation.yaml
 ```
+
+### ClickHouse Network Policies
+
+[k8s/clickhouse-networkpolicies.yaml](k8s/clickhouse-networkpolicies.yaml) locks down the ClickHouse and Keeper pods:
+
+- **Egress**: DNS, Keeper (2181), and the other replica (9000, 9009) only. ClickHouse has a local disk and no external dictionaries or table engines, so it needs nothing else. Blocking everything else keeps `url()`, `remote()` and similar table functions from reaching other namespaces, the API server, or cloud metadata.
+- **Ingress to ClickHouse**: this repo's pods in `access-accounting` (8123; the backup uses 9000), `monitoring/grafana` (9000, as `grafana_ro`), `monitoring/prometheus` (9363 metrics), the Altinity operator (8123), and the other replica.
+- **Keeper**: client port 2181 from ClickHouse and the operator only, Raft port 9444 between keepers.
+
+The operator pod is not selected, so its own traffic is unchanged. Apply with:
+
+```bash
+kubectl apply -n clickhouse -f k8s/clickhouse-networkpolicies.yaml
+```
+
+### ClickHouse Users
+
+| User | Used by | Rights |
+|---|---|---|
+| `aime` | ETL, backfill, institution import, backup | read-write, DDL |
+| `accounting_ro` | MCP server, OpenAPI bridge, XDMoD upload | `readonly=1`, `SELECT ON access_accounting.*`, 60 s query limit |
+| `grafana_ro` | Grafana "NRP Clickhouse" data source | `readonly=1`, `SELECT` on `access_accounting.*` and `reporting.*` |
+
+The read paths log in as `accounting_ro` because the MCP server is public and unauthenticated. A `readonly=1` user cannot write, run DDL, change settings or call table functions such as `url()`. The MCP, OpenAPI and XDMoD manifests set `CLICKHOUSE_USER` and read `CLICKHOUSE_PASSWORD` from the `clickhouse-readonly-credentials` secret; `env` overrides the writer credentials that come in through `envFrom`. In code these paths connect with `connect_clickhouse_readonly`, which skips the `CREATE DATABASE` bootstrap: ClickHouse rejects any DDL from a read-only user, even `IF NOT EXISTS`, and the ETL owns the schema.
+
+Password hashes are set out-of-band, never committed. To rotate the `accounting_ro` password:
+
+```bash
+PW=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40)
+kubectl create secret generic clickhouse-readonly-credentials -n access-accounting \
+  --from-literal=password="$PW" --dry-run=client -o yaml \
+  | kubeseal --controller-namespace sealed-secrets-operator --controller-name sealed-secrets --format yaml \
+  > apps/nrp-clickhouse/overlays/dev/sealed-secret-ch-readonly-creds.yaml
+kubectl patch chi access-accounting -n clickhouse --type=merge \
+  -p "{\"spec\":{\"configuration\":{\"users\":{\"accounting_ro/password_sha256_hex\":\"$(printf '%s' "$PW" | shasum -a 256 | cut -d' ' -f1)\"}}}}"
+unset PW
+```
+
+Patch the hash before the new SealedSecret reaches the cluster. Otherwise the readers fail to log in until both sides match. Use `kubectl patch`, not `kubectl apply -f k8s/clickhouse-installation.yaml`: the file holds placeholder hashes and would overwrite the real ones.
 
 ### Database Schema
 

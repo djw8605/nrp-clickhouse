@@ -1,0 +1,189 @@
+# NetworkPolicies for the ClickHouse cluster and its Keeper ensemble.
+#
+# Reference infrastructure, like clickhouse-installation.yaml: NOT managed by the
+# kustomize overlays in this repo. Apply separately, into the `clickhouse` namespace:
+#
+#     kubectl apply -n clickhouse -f k8s/clickhouse-networkpolicies.yaml
+#
+# Egress: ClickHouse needs nothing outside its own cluster. It has one local disk and
+# no dictionaries, named collections or URL/S3/MySQL/PostgreSQL table engines, so it
+# may reach only DNS, Keeper and the other replica. This stops url(), remote() and
+# similar table functions from being used as a proxy into other namespaces. Between
+# 2026-11-05 and 2026-11-07, queries through the old Grafana data source used url()
+# to probe 169.254.169.254, the API server, and services in other namespaces.
+#
+# Ingress: only the clients seen in system.query_log (2026-10-26 to 2026-11-09):
+#
+#   namespace          pods                                   port   ClickHouse user
+#   access-accounting  mcp, openapi, etl, xdmod-upload,       8123   aime
+#                      backfill, pod-name-backfill
+#   access-accounting  backup                                 9000   aime
+#   monitoring         grafana                                9000   grafana_ro
+#   monitoring         prometheus (PodMonitor scrape)         9363   -
+#   clickhouse         altinity-clickhouse-operator           8123   clickhouse_operator
+#
+# The access-accounting side of these flows is in k8s/base/networkpolicy.yaml;
+# tests/test_network_policies.py checks that the two files agree.
+#
+# Kubelet probes come from the pod's own node, which NetworkPolicy always allows.
+# The operator pod is not selected here, so its own traffic is unchanged.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: clickhouse-server
+  namespace: clickhouse
+spec:
+  podSelector:
+    matchLabels:
+      clickhouse.altinity.com/chi: access-accounting
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: access-accounting
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - mcp
+                  - openapi
+                  - etl
+                  - xdmod-upload
+                  - backfill
+                  - pod-name-backfill
+      ports:
+        - protocol: TCP
+          port: 8123
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: access-accounting
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: backup
+      ports:
+        - protocol: TCP
+          port: 9000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - protocol: TCP
+          port: 9000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9363
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: altinity-clickhouse-operator
+      ports:
+        - protocol: TCP
+          port: 8123
+    # Replica to replica: distributed queries (9000) and part fetches (9009).
+    - from:
+        - podSelector:
+            matchLabels:
+              clickhouse.altinity.com/chi: access-accounting
+      ports:
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 9009
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              clickhouse-keeper.altinity.com/chk: aime-keeper
+      ports:
+        - protocol: TCP
+          port: 2181
+    - to:
+        - podSelector:
+            matchLabels:
+              clickhouse.altinity.com/chi: access-accounting
+      ports:
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 9009
+---
+# Keeper has no authentication on 2181, so only ClickHouse and the operator may
+# reach it. The keepers talk to each other on the Raft port, 9444.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: clickhouse-keeper
+  namespace: clickhouse
+spec:
+  podSelector:
+    matchLabels:
+      clickhouse-keeper.altinity.com/chk: aime-keeper
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              clickhouse.altinity.com/chi: access-accounting
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: altinity-clickhouse-operator
+      ports:
+        - protocol: TCP
+          port: 2181
+    - from:
+        - podSelector:
+            matchLabels:
+              clickhouse-keeper.altinity.com/chk: aime-keeper
+      ports:
+        - protocol: TCP
+          port: 9444
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              clickhouse-keeper.altinity.com/chk: aime-keeper
+      ports:
+        - protocol: TCP
+          port: 9444

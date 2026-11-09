@@ -1,0 +1,195 @@
+# NetworkPolicies for this repo's workloads in the accounting namespace.
+#
+# Every pod built from k8s/base carries app.kubernetes.io/part-of=nrp-accounting
+# (kustomization.yaml `labels` with includeTemplates), so nrp-accounting-default-deny
+# isolates it in both directions. The other policies then open only the flows each
+# workload was seen to use (ClickHouse query_log and MCP/OpenAPI access logs,
+# 2026-10-26 to 2026-11-09):
+#
+#   component                  ingress                 egress
+#   mcp, openapi               HAProxy ingress :8000   ClickHouse :8123
+#   etl, xdmod-upload,         none                    ClickHouse :8123, HTTPS :443
+#     backfill jobs                                    (Thanos and portal via the NRP
+#                                                      ingress, GitHub raw, XDMoD)
+#   backup                     none                    ClickHouse :9000, HTTPS :443 (GCS)
+#
+# All of them also get DNS. Kubelet probes come from the pod's own node, which
+# NetworkPolicy always allows.
+#
+# A new workload gets no traffic at all until it has a policy here, and, if it talks
+# to ClickHouse, an ingress rule in k8s/clickhouse-networkpolicies.yaml.
+# tests/test_network_policies.py checks that the two files agree.
+#
+# Other pods in the namespace (the AIME app: aime-pg, backend, frontend, workers)
+# carry no part-of label, so these policies do not select them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nrp-accounting-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: nrp-accounting
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nrp-accounting-allow-dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: nrp-accounting
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# The MCP server and OpenAPI bridge are public, so they get no internet egress:
+# from these pods, only ClickHouse is reachable. The AIME app calls the OpenAPI
+# bridge through its public URL, so its requests also arrive from HAProxy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nrp-accounting-query-servers
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: nrp-accounting
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - mcp
+          - openapi
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: haproxy
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: haproxy-ingress
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: clickhouse
+          podSelector:
+            matchLabels:
+              clickhouse.altinity.com/chi: access-accounting
+      ports:
+        - protocol: TCP
+          port: 8123
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nrp-accounting-batch-jobs
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: nrp-accounting
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - etl
+          - xdmod-upload
+          - backfill
+          - pod-name-backfill
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: clickhouse
+          podSelector:
+            matchLabels:
+              clickhouse.altinity.com/chi: access-accounting
+      ports:
+        - protocol: TCP
+          port: 8123
+    # thanos.nrp-nautilus.io, portal.nrp.ai, raw.githubusercontent.com and
+    # data.ccr.xdmod.org. Private and link-local ranges (pods, services, cloud
+    # metadata) stay closed.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    # Thanos and the portal resolve to an NRP ingress node, where HAProxy listens on
+    # hostPort 443. A job scheduled on that node is DNATed to the HAProxy pod before
+    # policy is checked, so it needs the pod as a destination too.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: haproxy
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: haproxy-ingress
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nrp-accounting-backup
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: nrp-accounting
+      app.kubernetes.io/component: backup
+  policyTypes:
+    - Egress
+  egress:
+    # clickhouse-client uses the native protocol.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: clickhouse
+          podSelector:
+            matchLabels:
+              clickhouse.altinity.com/chi: access-accounting
+      ports:
+        - protocol: TCP
+          port: 9000
+    # rclone upload to Google Cloud Storage.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

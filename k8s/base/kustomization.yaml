@@ -15,8 +15,12 @@ resources:
   - service-mcp.yaml
   - service-openapi.yaml
   - ingress-mcp.yaml
+  - networkpolicy.yaml
 
 labels:
   - pairs:
       app.kubernetes.io/name: nrp-accounting-pipeline
       app.kubernetes.io/part-of: nrp-accounting
+    # Pod templates need part-of too: networkpolicy.yaml selects on it.
+    # Selectors are left alone because Deployment selectors are immutable.
+    includeTemplates: true

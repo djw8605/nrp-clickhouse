@@ -217,6 +217,19 @@ Deployed components:
 - `Service/nrp-accounting-mcp`: cluster-internal service on port `8000`
 - `Service/nrp-accounting-openapi`: cluster-internal service on port `8000`
 - `Ingress/nrp-accounting-mcp`: external HAProxy ingress for `https://nrp-accounting-mcp.nrp-nautilus.io/`
+- `NetworkPolicy/nrp-accounting-*`: default-deny for this repo's pods, plus the flows each one needs (see below)
+
+Network policies:
+
+[k8s/base/networkpolicy.yaml](k8s/base/networkpolicy.yaml) selects only pods with `app.kubernetes.io/part-of: nrp-accounting`, so other workloads in the namespace are unaffected. Every pod from `k8s/base` gets that label through the kustomization's `labels` with `includeTemplates`; the standalone backfill Jobs set it themselves.
+
+| Component | Ingress | Egress |
+|---|---|---|
+| `mcp`, `openapi` | HAProxy ingress pods, port 8000 | ClickHouse 8123 |
+| `etl`, `xdmod-upload`, `backfill`, `pod-name-backfill` | none | ClickHouse 8123; HTTPS 443 to public addresses (Thanos and portal through the NRP ingress, GitHub raw, XDMoD) |
+| `backup` | none | ClickHouse 9000; HTTPS 443 to public addresses (GCS) |
+
+All of them can reach DNS. The query servers face the internet, so they cannot reach anything except ClickHouse. A new workload gets no traffic until it is added to `networkpolicy.yaml`. If it talks to ClickHouse, add it to the `clickhouse-server` ingress in [k8s/clickhouse-networkpolicies.yaml](k8s/clickhouse-networkpolicies.yaml) too. `tests/test_network_policies.py` fails when the two files disagree.
 
 The provided ingress follows the NRP HAProxy pattern:
 
@@ -417,6 +430,20 @@ Apply with:
 
 ```bash
 kubectl apply -f k8s/clickhouse-installation.yaml
+```
+
+### ClickHouse Network Policies
+
+[k8s/clickhouse-networkpolicies.yaml](k8s/clickhouse-networkpolicies.yaml) locks down the ClickHouse and Keeper pods:
+
+- **Egress**: DNS, Keeper (2181), and the other replica (9000, 9009) only. ClickHouse has a local disk and no external dictionaries or table engines, so it needs nothing else. Blocking everything else keeps `url()`, `remote()` and similar table functions from reaching other namespaces, the API server, or cloud metadata.
+- **Ingress to ClickHouse**: this repo's pods in `access-accounting` (8123; the backup uses 9000), `monitoring/grafana` (9000, as `grafana_ro`), `monitoring/prometheus` (9363 metrics), the Altinity operator (8123), and the other replica.
+- **Keeper**: client port 2181 from ClickHouse and the operator only, Raft port 9444 between keepers.
+
+The operator pod is not selected, so its own traffic is unchanged. Apply with:
+
+```bash
+kubectl apply -n clickhouse -f k8s/clickhouse-networkpolicies.yaml
 ```
 
 ### Database Schema

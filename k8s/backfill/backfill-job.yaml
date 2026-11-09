@@ -11,6 +11,9 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: backfill
+        # This Job sits outside k8s/base's label transformer; the network
+        # policies in k8s/base/networkpolicy.yaml select on part-of.
+        app.kubernetes.io/part-of: nrp-accounting
     spec:
       serviceAccountName: nrp-accounting-pipeline
       restartPolicy: OnFailure

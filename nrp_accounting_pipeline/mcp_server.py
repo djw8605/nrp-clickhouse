@@ -135,6 +135,7 @@ def query_resource_usage(
     - gpu_model_name
     - unit
     - pod_name (only with granularity='pod')
+    - pod_uid (only with granularity='pod')
 
     GPU model filters should normally be paired with resource='gpu'. For example,
     "largest users of A100 GPUs" maps to top_resource_consumers(

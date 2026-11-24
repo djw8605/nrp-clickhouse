@@ -826,3 +826,39 @@ def test_unsupported_resource_is_still_rejected() -> None:
             resource="wallclock_nonsense",
             settings=TEST_SETTINGS,
         )
+
+
+def test_build_resource_usage_query_groups_by_pod_uid_at_pod_granularity() -> None:
+    client = PatternClient([])
+
+    spec = build_resource_usage_query(
+        client,
+        start_date=date(2026, 11, 1),
+        end_date=date(2026, 11, 1),
+        granularity="pod",
+        resource="gpu",
+        group_by=["date", "namespace", "created_by", "pod_uid", "pod_name"],
+        settings=TEST_SETTINGS,
+    )
+
+    assert "usage.pod_uid AS pod_uid" in spec.sql
+    assert (
+        "GROUP BY usage.date, usage.namespace, usage.created_by, usage.pod_uid, usage.pod_name"
+    ) in " ".join(spec.sql.split())
+    assert "FROM accounting.cluster_pod_usage_daily AS usage" in spec.sql
+    assert spec.group_by == ["date", "namespace", "created_by", "pod_uid", "pod_name"]
+
+
+def test_pod_uid_requires_pod_granularity() -> None:
+    client = PatternClient([])
+
+    with pytest.raises(ValueError, match="pod_uid can only be used when granularity='pod'"):
+        build_resource_usage_query(
+            client,
+            start_date=date(2026, 11, 1),
+            end_date=date(2026, 11, 1),
+            granularity="namespace",
+            resource="gpu",
+            group_by=["pod_uid"],
+            settings=TEST_SETTINGS,
+        )

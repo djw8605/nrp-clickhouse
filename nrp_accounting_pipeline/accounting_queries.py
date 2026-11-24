@@ -119,7 +119,10 @@ _GROUPABLE_EXPRESSIONS: dict[str, str] = {
     "commercial": "if(coalesce(meta.commercial, false), 'true', 'false')",
     "node_institution": "coalesce(node_map.institution_name, 'Unknown')",
     "pod_name": "usage.pod_name",
+    "pod_uid": "usage.pod_uid",
 }
+
+_POD_ONLY_DIMENSIONS = frozenset({"pod_name", "pod_uid"})
 
 _LISTABLE_DIMENSIONS = {
     "namespace": _GROUPABLE_EXPRESSIONS["namespace"],
@@ -457,8 +460,8 @@ def _validate_group_by(granularity: str, group_by: Sequence[str] | None) -> list
         if column not in _GROUPABLE_EXPRESSIONS:
             allowed = ", ".join(sorted(_GROUPABLE_EXPRESSIONS))
             raise ValueError(f"Unsupported group_by field {column!r}. Allowed values: {allowed}")
-        if granularity != "pod" and column == "pod_name":
-            raise ValueError("pod_name can only be used when granularity='pod'")
+        if granularity != "pod" and column in _POD_ONLY_DIMENSIONS:
+            raise ValueError(f"{column} can only be used when granularity='pod'")
         if column in seen:
             continue
         validated.append(column)
@@ -479,8 +482,8 @@ def _validate_dimension(
     if name not in allowed_dimensions:
         allowed = ", ".join(sorted(allowed_dimensions))
         raise ValueError(f"Unsupported dimension {name!r}. Allowed values: {allowed}")
-    if granularity != "pod" and name == "pod_name":
-        raise ValueError("pod_name can only be used when granularity='pod'")
+    if granularity != "pod" and name in _POD_ONLY_DIMENSIONS:
+        raise ValueError(f"{name} can only be used when granularity='pod'")
     return name
 
 
